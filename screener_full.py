@@ -449,14 +449,21 @@ def universe_kr():
 
 
 def universe_us():
-    frames = []
-    for src in ("S&P500", "NASDAQ"):
+    frames, notes = [], []
+    for src in ("S&P500", "NASDAQ", "NYSE"):
         try:
-            frames.append(fdr.StockListing(src))
+            f = fdr.StockListing(src)
+            if f is not None and len(f):
+                frames.append(f)
+                notes.append(f"{src}={len(f)}행({','.join(map(str, list(f.columns)[:8]))})")
+            else:
+                notes.append(f"{src}=빈결과")
         except Exception as e:
-            print(f"StockListing('{src}') 실패: {e}", file=sys.stderr)
+            notes.append(f"{src}=예외:{type(e).__name__}:{str(e)[:50]}")
+    DIAG["us_listing"] = notes
+    print("미국 리스팅: " + " | ".join(notes))
     if not frames:
-        raise RuntimeError("미국 종목 리스트를 받지 못했습니다")
+        raise RuntimeError("미국 종목 리스트를 받지 못했습니다 — " + " | ".join(notes))
     df = pd.concat(frames, ignore_index=True)
     sym = _col(df, "Symbol", "Code")
     nm = _col(df, "Name")
@@ -468,14 +475,38 @@ def universe_us():
     u["mcap"] = pd.to_numeric(mc, errors="coerce") / 1e6 if mc is not None else np.nan
     ind = _col(df, "Sector", "Industry")   # 큰 분류를 우선
     u["sector"] = ind.astype(str).str.strip() if ind is not None else ""
-    DIAG["us_sector"] = [("컬럼=" + str(ind.name)) if ind is not None else "업종컬럼없음",
-                         "가용컬럼=" + ",".join(map(str, list(df.columns)[:12]))]
+    DIAG["us_sector"] = DIAG.get("us_listing", []) + [
+        ("업종컬럼=" + str(ind.name)) if ind is not None else "업종컬럼없음",
+        "가용컬럼=" + ",".join(map(str, list(df.columns)[:14])),
+    ]
     u["value"] = np.nan
     u = u[u["ticker"].str.fullmatch(r"[A-Z.\-]{1,6}", na=False)]
     if u["mcap"].notna().any():
         u = u[u["mcap"].fillna(0) >= MIN_CAP_US]
         u = u.sort_values("mcap", ascending=False)
     return u.drop_duplicates("ticker").head(MAX_US).reset_index(drop=True)
+
+
+def previous_universe(market):
+    """직전 산출물에서 종목 목록을 복원한다 (리스팅 조회가 깨졌을 때의 안전망)."""
+    path = f"output/universe_{market}.json"
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    rows = d.get("rows") or []
+    if not rows:
+        return None
+    return pd.DataFrame([{
+        "ticker": r.get("ticker", ""),
+        "name": r.get("name", ""),
+        "mcap": r.get("mcap"),
+        "value": r.get("value"),
+        "sector": r.get("sector", ""),
+    } for r in rows if r.get("ticker")])
 
 
 def run_market(market, uni):
@@ -615,15 +646,35 @@ def main():
     targets = os.getenv("MARKETS", "kr,us").split(",")
     for mk in [t.strip() for t in targets if t.strip()]:
         try:
-            uni = universe_kr() if mk == "kr" else universe_us()
+            try:
+                uni = universe_kr() if mk == "kr" else universe_us()
+            except Exception as e:
+                uni = previous_universe(mk)
+                note = f"유니버스조회실패:{type(e).__name__}:{str(e)[:80]}"
+                if uni is None or not len(uni):
+                    raise
+                note += f" → 직전 목록 {len(uni):,}종목으로 진행"
+                print(note, file=sys.stderr)
+                DIAG[mk + "_sector"] = DIAG.get(mk + "_sector", []) + [note]
             payload = run_market(mk, uni)
             path = f"output/universe_{mk}.json"
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
             print(f"wrote {path} — {payload['count']:,} rows, {os.path.getsize(path):,} bytes")
-        except Exception:
+        except Exception as e:
             traceback.print_exc()
             print(f"[{mk}] 실패 — 기존 파일 유지", file=sys.stderr)
+            try:   # 실패 사유를 기존 산출물에 덧붙여 다음에 읽을 수 있게 한다
+                path = f"output/universe_{mk}.json"
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as f:
+                        d = json.load(f)
+                    d["last_error"] = (f"{datetime.now(KST).strftime('%Y-%m-%d %H:%M')} "
+                                       f"{type(e).__name__}: {str(e)[:200]}")
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(d, f, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
