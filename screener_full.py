@@ -298,7 +298,22 @@ def universe_kr():
         u["value"] = (pd.to_numeric(c, errors="coerce") * pd.to_numeric(v, errors="coerce") / 1e8
                       if c is not None and v is not None else np.nan)
     mk = _col(df, "Market", "시장구분")
-    u["sector"] = mk.astype(str) if mk is not None else ""
+    u["market_seg"] = mk.astype(str) if mk is not None else ""
+
+    # 업종은 상세 리스팅(KRX-DESC)에만 들어 있다. 실패하면 시장구분으로 대체.
+    u["sector"] = ""
+    try:
+        desc = fdr.StockListing("KRX-DESC")
+        dcode = _col(desc, "Code", "Symbol", "종목코드")
+        dsec = _col(desc, "Sector", "Industry", "업종", "업종명")
+        if dcode is not None and dsec is not None:
+            smap = dict(zip(dcode.astype(str).str.zfill(6), dsec.astype(str).str.strip()))
+            u["sector"] = u["ticker"].map(smap).fillna("")
+            print(f"업종 매핑: {int((u['sector'] != '').sum()):,}/{len(u):,}종목")
+    except Exception as e:
+        print(f"KRX-DESC 업종 조회 실패: {e}", file=sys.stderr)
+    blank = u["sector"].isin(["", "nan", "None"])
+    u.loc[blank, "sector"] = u.loc[blank, "market_seg"]
 
     u = u[~u["name"].str.contains("스팩", na=False)]
     u = u[~u["name"].str.contains(r"우[A-Z]?$|\d우", regex=True, na=False)]
@@ -339,8 +354,8 @@ def universe_us():
     })
     mc = _col(df, "MarketCap", "Marcap")
     u["mcap"] = pd.to_numeric(mc, errors="coerce") / 1e6 if mc is not None else np.nan
-    ind = _col(df, "Industry", "Sector")
-    u["sector"] = ind.astype(str) if ind is not None else ""
+    ind = _col(df, "Sector", "Industry")   # 큰 분류를 우선
+    u["sector"] = ind.astype(str).str.strip() if ind is not None else ""
     u["value"] = np.nan
     u = u[u["ticker"].str.fullmatch(r"[A-Z.\-]{1,6}", na=False)]
     if u["mcap"].notna().any():
@@ -391,6 +406,16 @@ def run_market(market, uni):
         rows.append(m)
 
     rows.sort(key=lambda x: (x.get("value") or 0), reverse=True)
+
+    # 종목이 3개 미만인 꼬리 업종은 '기타' 로 묶는다 (섹터 화면이 잘게 부서지는 것 방지)
+    cnt = {}
+    for r in rows:
+        k = (r.get("sector") or "").strip()
+        cnt[k] = cnt.get(k, 0) + 1
+    for r in rows:
+        k = (r.get("sector") or "").strip()
+        r["sector"] = k if k and cnt.get(k, 0) >= 3 else ("기타" if k else "미분류")
+    print(f"[{market}] 섹터 {len(set(r['sector'] for r in rows))}개")
 
     # 미국은 시총·거래대금 단위가 백만달러
     sch = [dict(s) for s in SCHEMA]
