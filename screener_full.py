@@ -112,8 +112,11 @@ def compute_metrics(df):
         ww = min(w, n)
         hh, ll = float(high.iloc[-ww:].max()), float(low.iloc[-ww:].min())
         gap = (px / hh - 1) * 100 if hh > 0 else np.nan
-        m[f"hi_gap{w}"] = _r(gap)                                   # 기간 고점 대비 %
-        m[f"is_hi{w}"] = bool(np.isfinite(gap) and gap >= -0.0001)  # 기간 신고가 갱신
+        m[f"hi_gap{w}"] = _r(gap)     # 현재가가 기간 고점에서 얼마나 눌렸나 (당일 포함)
+        # 신고가 갱신 = 당일 고가가 '직전' 기간의 최고 고가 이상 (HTS 신고가와 같은 정의).
+        # 종가를 당일 포함 고가와 비교하면 당일 고가를 넘을 수 없어 사실상 항상 False 가 된다.
+        prior = high.iloc[-ww:-1]
+        m[f"is_hi{w}"] = bool(len(prior) and float(high.iloc[-1]) >= float(prior.max()) - 1e-9)
         if w == 252:
             m["lo_gap252"] = _r((px / ll - 1) * 100 if ll > 0 else np.nan)
             m["hi252"] = _r(hh, 1)
@@ -396,6 +399,18 @@ def run_market(market, uni):
             if s["key"] in ("mcap", "value"):
                 s["unit"] = "M$"
 
+    # 절반도 못 채운 지표는 스키마에서 뺀다 — 필터를 걸면 전 종목이 사라지기 때문.
+    # (미국 종목 리스트에는 시가총액 컬럼이 없는 경우가 있다)
+    if rows:
+        keep = []
+        for s in sch:
+            filled = sum(1 for r in rows if r.get(s["key"]) is not None)
+            if s["type"] == "bool" or filled / len(rows) >= 0.5:
+                keep.append(s)
+            else:
+                print(f"[{market}] 스키마에서 제외: {s['label']} (채움률 {filled/len(rows)*100:.0f}%)")
+        sch = keep
+
     return {
         "market": market,
         "date": END,
@@ -424,10 +439,13 @@ def self_test():
     assert m["ma_above_cnt"] == 4 and m["obv_high"]
     assert m["streak_up"] >= 3 and m["rsi14"] > 60
 
-    # 고가=종가인 봉이면 신고가로 잡혀야 한다
-    g = pd.DataFrame({"Open": up * 0.99, "High": up, "Low": up * 0.98,
-                      "Close": up, "Volume": np.full(300, 1e6)})
-    assert compute_metrics(g)["is_hi252"] and compute_metrics(g)["is_hi20"]
+    # 신고가: 당일 고가가 직전 기간 최고 고가를 넘으면 갱신
+    assert m["is_hi252"] and m["is_hi20"], "우상향 종목인데 신고가로 안 잡힘"
+    fall = F(up.copy())
+    fall.loc[fall.index[-1], ["High", "Close", "Open"]] = float(up[-1]) * 0.9
+    r = compute_metrics(fall)
+    assert not r["is_hi252"] and not r["is_hi20"], "고가가 못 넘었는데 신고가로 잡힘"
+    assert r["hi_gap252"] < -5
 
     dn = np.linspace(200, 100, 300)
     m2 = compute_metrics(F(dn, dn * 1.01))
@@ -448,7 +466,7 @@ def self_test():
     keys = {s["key"] for s in SCHEMA}
     missing = keys - set(m.keys()) - {"mcap", "value"}
     assert not missing, f"SCHEMA 에 있으나 계산되지 않는 지표: {missing}"
-    print("self-test OK (7 cases)")
+    print("self-test OK (8 cases)")
 
 
 def main():
