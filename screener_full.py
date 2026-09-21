@@ -277,6 +277,69 @@ def _col(df, *names):
     return None
 
 
+DIAG = {}
+
+
+def kr_sector_map(tickers):
+    """국내 업종(섹터) 매핑. 여러 경로를 순서대로 시도하고 진단 로그를 함께 돌려준다."""
+    diag, best, best_hit = [], {}, 0
+
+    # (1) FinanceDataReader 상세 리스팅들
+    for src in ("KRX-DESC", "KRX", "KOSPI", "KOSDAQ"):
+        try:
+            df = fdr.StockListing(src)
+        except Exception as e:
+            diag.append(f"{src}=예외:{type(e).__name__}")
+            continue
+        if df is None or not len(df):
+            diag.append(f"{src}=빈결과")
+            continue
+        c = _col(df, "Code", "Symbol", "종목코드")
+        sec = _col(df, "Sector", "Industry", "업종", "업종명", "SectorName", "IndustryName")
+        if c is None or sec is None:
+            diag.append(f"{src}=업종컬럼없음({','.join(map(str, list(df.columns)[:12]))})")
+            continue
+        m = {}
+        for k, v in zip(c.astype(str).str.zfill(6), sec.astype(str)):
+            v = v.strip()
+            if v and v.lower() not in ("nan", "none", "-"):
+                m[k] = v
+        hit = sum(1 for t in tickers if t in m)
+        diag.append(f"{src}={hit}/{len(tickers)}")
+        if hit > best_hit:
+            best, best_hit = m, hit
+        if best_hit >= len(tickers) * 0.8:
+            return best, diag
+
+    # (2) KRX 업종분류 현황 (깃허브 러너는 KRX 에 직접 접근할 수 있다)
+    try:
+        import requests
+        url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+        day = datetime.now(KST).strftime("%Y%m%d")
+        m = {}
+        for mkt in ("STK", "KSQ"):
+            r = requests.post(url, timeout=30, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "http://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd",
+            }, data={
+                "bld": "dbms/MDC/STAT/standard/MDCSTAT03901",
+                "mktId": mkt, "trdDd": day, "money": "1", "csvxls_isNo": "false",
+            })
+            for row in (r.json().get("block1") or r.json().get("OutBlock_1") or []):
+                code = str(row.get("ISU_SRT_CD", "")).zfill(6)
+                nm = str(row.get("IDX_IND_NM", "")).strip()
+                if code and nm:
+                    m[code] = nm
+        hit = sum(1 for t in tickers if t in m)
+        diag.append(f"KRX-API={hit}/{len(tickers)}")
+        if hit > best_hit:
+            best, best_hit = m, hit
+    except Exception as e:
+        diag.append(f"KRX-API=예외:{type(e).__name__}")
+
+    return best, diag
+
+
 def universe_kr():
     listing = fdr.StockListing("KRX")
     df = listing.copy()
@@ -300,20 +363,12 @@ def universe_kr():
     mk = _col(df, "Market", "시장구분")
     u["market_seg"] = mk.astype(str) if mk is not None else ""
 
-    # 업종은 상세 리스팅(KRX-DESC)에만 들어 있다. 실패하면 시장구분으로 대체.
-    u["sector"] = ""
-    try:
-        desc = fdr.StockListing("KRX-DESC")
-        dcode = _col(desc, "Code", "Symbol", "종목코드")
-        dsec = _col(desc, "Sector", "Industry", "업종", "업종명")
-        if dcode is not None and dsec is not None:
-            smap = dict(zip(dcode.astype(str).str.zfill(6), dsec.astype(str).str.strip()))
-            u["sector"] = u["ticker"].map(smap).fillna("")
-            print(f"업종 매핑: {int((u['sector'] != '').sum()):,}/{len(u):,}종목")
-    except Exception as e:
-        print(f"KRX-DESC 업종 조회 실패: {e}", file=sys.stderr)
+    smap, diag = kr_sector_map(set(u["ticker"]))
+    DIAG["kr_sector"] = diag
+    u["sector"] = u["ticker"].map(smap).fillna("") if smap else ""
     blank = u["sector"].isin(["", "nan", "None"])
     u.loc[blank, "sector"] = u.loc[blank, "market_seg"]
+    print("업종 매핑 진단: " + " | ".join(diag))
 
     u = u[~u["name"].str.contains("스팩", na=False)]
     u = u[~u["name"].str.contains(r"우[A-Z]?$|\d우", regex=True, na=False)]
@@ -356,6 +411,8 @@ def universe_us():
     u["mcap"] = pd.to_numeric(mc, errors="coerce") / 1e6 if mc is not None else np.nan
     ind = _col(df, "Sector", "Industry")   # 큰 분류를 우선
     u["sector"] = ind.astype(str).str.strip() if ind is not None else ""
+    DIAG["us_sector"] = [("컬럼=" + str(ind.name)) if ind is not None else "업종컬럼없음",
+                         "가용컬럼=" + ",".join(map(str, list(df.columns)[:12]))]
     u["value"] = np.nan
     u = u[u["ticker"].str.fullmatch(r"[A-Z.\-]{1,6}", na=False)]
     if u["mcap"].notna().any():
@@ -443,6 +500,7 @@ def run_market(market, uni):
         "count": len(rows),
         "failed": failed,
         "params": {"bb_len": BB_LEN, "bb_k": BB_K},
+        "diag": DIAG.get(market + "_sector", []),
         "schema": sch,
         "rows": rows,
     }
