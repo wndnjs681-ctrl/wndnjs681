@@ -311,33 +311,90 @@ def kr_sector_map(tickers):
         if best_hit >= len(tickers) * 0.8:
             return best, diag
 
-    # (2) KRX 업종분류 현황 (깃허브 러너는 KRX 에 직접 접근할 수 있다)
+    # (2) 네이버 금융 업종 분류 — 가장 안정적인 경로
     try:
-        import requests
-        url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-        day = datetime.now(KST).strftime("%Y%m%d")
-        m = {}
-        for mkt in ("STK", "KSQ"):
-            r = requests.post(url, timeout=30, headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "http://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd",
-            }, data={
-                "bld": "dbms/MDC/STAT/standard/MDCSTAT03901",
-                "mktId": mkt, "trdDd": day, "money": "1", "csvxls_isNo": "false",
-            })
-            for row in (r.json().get("block1") or r.json().get("OutBlock_1") or []):
-                code = str(row.get("ISU_SRT_CD", "")).zfill(6)
-                nm = str(row.get("IDX_IND_NM", "")).strip()
-                if code and nm:
-                    m[code] = nm
+        m = _sector_from_naver()
         hit = sum(1 for t in tickers if t in m)
-        diag.append(f"KRX-API={hit}/{len(tickers)}")
+        diag.append(f"NAVER={hit}/{len(tickers)}")
+        if hit > best_hit:
+            best, best_hit = m, hit
+        if best_hit >= len(tickers) * 0.6:
+            return best, diag
+    except Exception as e:
+        diag.append(f"NAVER=예외:{type(e).__name__}:{str(e)[:60]}")
+
+    # (3) KRX 업종분류 현황 API
+    try:
+        m, note = _sector_from_krx()
+        hit = sum(1 for t in tickers if t in m)
+        diag.append(f"KRX-API={hit}/{len(tickers)}{note}")
         if hit > best_hit:
             best, best_hit = m, hit
     except Exception as e:
-        diag.append(f"KRX-API=예외:{type(e).__name__}")
+        diag.append(f"KRX-API=예외:{type(e).__name__}:{str(e)[:60]}")
 
     return best, diag
+
+
+def _sector_from_naver():
+    """네이버 금융 업종별 시세에서 종목코드 → 업종명 매핑을 만든다."""
+    import re
+    import requests
+    H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    BASE = "https://finance.naver.com"
+    r = requests.get(BASE + "/sise/sise_group.naver?type=upjong", headers=H, timeout=30)
+    html = r.content.decode("euc-kr", "ignore")
+    groups = re.findall(
+        r'sise_group_detail\.(?:naver|nhn)\?type=upjong&(?:amp;)?no=(\d+)"[^>]*>([^<]+)</a>', html)
+    m = {}
+    for no, nm in groups:
+        nm = nm.strip()
+        if not nm:
+            continue
+        d = requests.get(f"{BASE}/sise/sise_group_detail.naver?type=upjong&no={no}",
+                         headers=H, timeout=30)
+        dh = d.content.decode("euc-kr", "ignore")
+        for code in re.findall(r'/item/main\.(?:naver|nhn)\?code=(\d{6})', dh):
+            m.setdefault(code, nm)
+        time.sleep(0.12)
+    if not groups:
+        raise RuntimeError(f"업종 목록 파싱 실패(len={len(html)})")
+    return m
+
+
+def _sector_from_krx():
+    """KRX 업종분류 현황. 오늘이 휴장이면 직전 영업일까지 되짚는다."""
+    import requests
+    url = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+    H = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd",
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    }
+    note, m = "", {}
+    for back in range(0, 6):
+        day = (datetime.now(KST) - timedelta(days=back)).strftime("%Y%m%d")
+        m = {}
+        for mkt in ("STK", "KSQ"):
+            r = requests.post(url, headers=H, timeout=30, data={
+                "bld": "dbms/MDC/STAT/standard/MDCSTAT03901",
+                "mktId": mkt, "trdDd": day, "money": "1", "csvxls_isNo": "false",
+            })
+            try:
+                js = r.json()
+            except Exception:
+                note = f"(비JSON {r.status_code}: {r.text[:60]!r})"
+                return {}, note
+            rows = js.get("block1") or js.get("OutBlock_1") or js.get("output") or []
+            for row in rows:
+                code = str(row.get("ISU_SRT_CD") or row.get("ISU_CD") or "").zfill(6)
+                nm = str(row.get("IDX_IND_NM") or row.get("SECT_TP_NM") or "").strip()
+                if code and nm:
+                    m[code] = nm
+        if m:
+            return m, f"(기준일 {day})"
+    return m, note or "(모든 날짜 빈결과)"
 
 
 def universe_kr():
