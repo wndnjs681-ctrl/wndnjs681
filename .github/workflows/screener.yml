@@ -1,0 +1,52 @@
+name: screener
+
+on:
+  schedule:
+    # 국내 장 마감 후 — 평일 16:50 KST (07:50 UTC)
+    - cron: "50 7 * * 1-5"
+    # 아침 브리핑 전 보험용 — 평일 06:30 KST (전일 21:30 UTC)
+    - cron: "30 21 * * 0-4"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet finance-datareader pandas numpy lxml requests beautifulsoup4
+
+      - name: Run screener
+        env:
+          NEAR_PCT: "15"
+          OBV_WIN: "252"
+          HIGH_WIN: "252"
+          STREAK: "3"
+          MIN_CAP_EOK: "1000"
+          MIN_VALUE_EOK: "10"
+          MAX_TICKERS: "900"
+          WORKERS: "8"
+          TOP_N: "20"
+        run: python screener.py
+
+      - name: Commit output
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A output
+          git diff --staged --quiet || git commit -m "screener: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase --autostash || true
+          git push
