@@ -42,6 +42,18 @@ BB_K       = float(os.getenv("BB_K", "1.5"))             # 볼린저 표준편�
 # ══════════════════════════════════════════════════════════════
 # 지표 계산
 # ══════════════════════════════════════════════════════════════
+def _safe_str(v):
+    """NaN/None/실수 등 무엇이 오든 안전한 문자열로 만든다."""
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        if not np.isfinite(v):
+            return ""
+        return str(v)
+    t = str(v).strip()
+    return "" if t.lower() in ("nan", "none", "-", "<na>") else t
+
+
 def _r(x, n=2):
     """NaN/inf 를 None 으로 바꾸며 반올림 (JSON 안전)"""
     try:
@@ -323,7 +335,19 @@ def kr_sector_map(tickers):
     except Exception as e:
         diag.append(f"NAVER=예외:{type(e).__name__}:{str(e)[:60]}")
 
-    # (3) KRX 업종분류 현황 API
+    # (3) pykrx — KRX 업종지수의 구성종목으로 업종을 역산
+    try:
+        m = _sector_from_pykrx()
+        hit = sum(1 for t in tickers if t in m)
+        diag.append(f"PYKRX={hit}/{len(tickers)}")
+        if hit > best_hit:
+            best, best_hit = m, hit
+        if best_hit >= len(tickers) * 0.6:
+            return best, diag
+    except Exception as e:
+        diag.append(f"PYKRX=예외:{type(e).__name__}:{str(e)[:60]}")
+
+    # (4) KRX 업종분류 현황 API
     try:
         m, note = _sector_from_krx()
         hit = sum(1 for t in tickers if t in m)
@@ -344,21 +368,73 @@ def _sector_from_naver():
     BASE = "https://finance.naver.com"
     r = requests.get(BASE + "/sise/sise_group.naver?type=upjong", headers=H, timeout=30)
     html = r.content.decode("euc-kr", "ignore")
-    groups = re.findall(
-        r'sise_group_detail\.(?:naver|nhn)\?type=upjong&(?:amp;)?no=(\d+)"[^>]*>([^<]+)</a>', html)
+    links = re.findall(r'href="([^"]*sise_group_detail[^"]*)"[^>]*>(.*?)</a>', html, re.S)
+    groups = []
+    seen = set()
+    for href, label in links:
+        mo = re.search(r'no=(\d+)', href)
+        nm = re.sub(r"<[^>]+>", "", label).replace("&amp;", "&").strip()
+        if mo and nm and mo.group(1) not in seen:
+            seen.add(mo.group(1))
+            groups.append((mo.group(1), nm))
+    if not groups:
+        i = html.find("upjong")
+        snip = html[max(0, i - 140):i + 200] if i >= 0 else html[:220]
+        raise RuntimeError(f"업종 목록 파싱 실패(len={len(html)}) 조각={snip!r}"[:420])
     m = {}
     for no, nm in groups:
-        nm = nm.strip()
-        if not nm:
-            continue
         d = requests.get(f"{BASE}/sise/sise_group_detail.naver?type=upjong&no={no}",
                          headers=H, timeout=30)
         dh = d.content.decode("euc-kr", "ignore")
-        for code in re.findall(r'/item/main\.(?:naver|nhn)\?code=(\d{6})', dh):
+        for code in re.findall(r'code=(\d{6})', dh):
             m.setdefault(code, nm)
         time.sleep(0.12)
-    if not groups:
-        raise RuntimeError(f"업종 목록 파싱 실패(len={len(html)})")
+    return m
+
+
+def _sector_from_pykrx():
+    """pykrx 로 KRX 업종지수별 구성종목을 받아 종목 → 업종 매핑을 만든다."""
+    try:
+        from pykrx import stock
+    except ImportError:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pykrx"],
+                       check=True, timeout=300)
+        from pykrx import stock
+
+    day = None
+    for back in range(0, 8):
+        d = (datetime.now(KST) - timedelta(days=back)).strftime("%Y%m%d")
+        try:
+            if len(stock.get_index_ticker_list(date=d, market="KOSPI")):
+                day = d
+                break
+        except Exception:
+            continue
+    if day is None:
+        raise RuntimeError("영업일을 찾지 못함")
+
+    # 업종이 아닌 규모별·전체 지수는 제외
+    SKIP = ("코스피", "코스닥", "대형주", "중형주", "소형주", "지수", "우선주",
+            "KRX", "K-뉴딜", "배당", "가치", "ESG", "섹터", "글로벌")
+    m = {}
+    for market in ("KOSPI", "KOSDAQ"):
+        for idx in stock.get_index_ticker_list(date=day, market=market):
+            try:
+                nm = stock.get_index_ticker_name(idx).strip()
+            except Exception:
+                continue
+            if any(k in nm for k in SKIP):
+                continue
+            try:
+                codes = stock.get_index_portfolio_deposit_file(idx, date=day)
+            except Exception:
+                continue
+            for c in codes or []:
+                m.setdefault(str(c).zfill(6), nm)
+            time.sleep(0.05)
+    if not m:
+        raise RuntimeError("업종지수 구성종목이 비어 있음")
     return m
 
 
@@ -422,7 +498,7 @@ def universe_kr():
 
     smap, diag = kr_sector_map(set(u["ticker"]))
     DIAG["kr_sector"] = diag
-    u["sector"] = u["ticker"].map(smap).fillna("") if smap else ""
+    u["sector"] = u["ticker"].map(smap).map(_safe_str) if smap else ""
     blank = u["sector"].isin(["", "nan", "None"])
     u.loc[blank, "sector"] = u.loc[blank, "market_seg"]
     print("업종 매핑 진단: " + " | ".join(diag))
@@ -474,7 +550,7 @@ def universe_us():
     mc = _col(df, "MarketCap", "Marcap")
     u["mcap"] = pd.to_numeric(mc, errors="coerce") / 1e6 if mc is not None else np.nan
     ind = _col(df, "Sector", "Industry")   # 큰 분류를 우선
-    u["sector"] = ind.astype(str).str.strip() if ind is not None else ""
+    u["sector"] = ind.map(_safe_str) if ind is not None else ""
     DIAG["us_sector"] = DIAG.get("us_listing", []) + [
         ("업종컬럼=" + str(ind.name)) if ind is not None else "업종컬럼없음",
         "가용컬럼=" + ",".join(map(str, list(df.columns)[:14])),
@@ -538,7 +614,7 @@ def run_market(market, uni):
             continue
         m["ticker"] = r["ticker"]
         m["name"] = r["name"]
-        m["sector"] = r.get("sector", "") or ""
+        m["sector"] = _safe_str(r.get("sector"))
         mc, vl = r.get("mcap"), r.get("value")
         m["mcap"] = _r(mc, 0) if pd.notna(mc) else None
         # 거래대금이 리스팅에 없으면 마지막 봉으로 추정
@@ -555,10 +631,11 @@ def run_market(market, uni):
     # 종목이 3개 미만인 꼬리 업종은 '기타' 로 묶는다 (섹터 화면이 잘게 부서지는 것 방지)
     cnt = {}
     for r in rows:
-        k = (r.get("sector") or "").strip()
+        k = _safe_str(r.get("sector"))
+        r["sector"] = k
         cnt[k] = cnt.get(k, 0) + 1
     for r in rows:
-        k = (r.get("sector") or "").strip()
+        k = r["sector"]
         r["sector"] = k if k and cnt.get(k, 0) >= 3 else ("기타" if k else "미분류")
     print(f"[{market}] 섹터 {len(set(r['sector'] for r in rows))}개")
 
