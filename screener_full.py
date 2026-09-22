@@ -303,6 +303,7 @@ def _col(df, *names):
 
 
 DIAG = {}
+_SERIES = None
 
 
 def _sector_from_file():
@@ -1031,6 +1032,45 @@ def attach_valuation(market, rows):
     return notes
 
 
+SERIES_DAYS = int(os.getenv("SERIES_DAYS", "250"))
+
+
+def build_series(market, data, rows):
+    """차트용 일봉 시계열. 종가·거래량만 압축해 담고, 이동평균·볼린저는
+    브라우저가 직접 계산한다(전송량 1/5). 250봉을 실어야 120봉 화면에서
+    MA120·BB150 이 끊기지 않는다."""
+    keep = {r["ticker"] for r in rows}
+    # 날짜 축은 가장 봉이 많은 종목 기준으로 하나만 싣는다 (휴장일은 시장 공통)
+    base = None
+    for t, d in data.items():
+        if t in keep and (base is None or len(d) > len(base)):
+            base = d
+    if base is None:
+        return None
+    dates = [x.strftime("%y%m%d") for x in base.index[-SERIES_DAYS:]]
+
+    def enc_close(v):
+        return str(int(round(v))) if abs(v) >= 100 else str(round(float(v), 2))
+
+    out = {}
+    for t, d in data.items():
+        if t not in keep or len(d) < 60:
+            continue
+        c = d["Close"].astype(float).iloc[-SERIES_DAYS:]
+        v = d["Volume"].astype(float).iloc[-SERIES_DAYS:]
+        c = c[np.isfinite(c)]
+        if len(c) < 60:
+            continue
+        v = v.reindex(c.index).fillna(0)
+        out[t] = {
+            "c": ",".join(enc_close(x) for x in c),
+            "v": ",".join(str(int(round(x / 1000))) for x in v),   # 천주 단위
+        }
+    return {"market": market, "dates": dates, "days": SERIES_DAYS,
+            "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
+            "count": len(out), "s": out}
+
+
 def run_market(market, uni):
     print(f"[{market}] universe = {len(uni):,}")
     data, failed = {}, 0
@@ -1090,6 +1130,15 @@ def run_market(market, uni):
     except Exception as e:
         traceback.print_exc()
         DIAG[market + "_valuation"] = [f"전체실패:{type(e).__name__}:{str(e)[:80]}"]
+
+    global _SERIES
+    try:
+        _SERIES = build_series(market, data, rows)
+        if _SERIES:
+            print(f"[{market}] 차트 시계열 {_SERIES['count']:,}종목 × {SERIES_DAYS}봉")
+    except Exception as e:
+        traceback.print_exc()
+        _SERIES = None
 
     # 미국은 시총·거래대금 단위가 백만달러
     sch = [dict(s) for s in SCHEMA]
@@ -1217,6 +1266,11 @@ def main():
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
             print(f"wrote {path} — {payload['count']:,} rows, {os.path.getsize(path):,} bytes")
+            if _SERIES:
+                sp = f"output/series_{mk}.json"
+                with open(sp, "w", encoding="utf-8") as f:
+                    json.dump(_SERIES, f, ensure_ascii=False, separators=(",", ":"))
+                print(f"wrote {sp} — {_SERIES['count']:,} tickers, {os.path.getsize(sp):,} bytes")
         except Exception as e:
             traceback.print_exc()
             print(f"[{mk}] 실패 — 기존 파일 유지", file=sys.stderr)
