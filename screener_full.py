@@ -601,33 +601,82 @@ def krx_market_data():
     return {}, note or "(모든 날짜 빈결과)"
 
 
-def krx_fundamental(day=None):
+# PER/PBR/배당수익률 화면은 시세 화면과 menuId 가 달라, 세션을 그 화면으로
+# 맞춰 주지 않으면 KRX 가 400 'LOGOUT' 을 돌려준다.
+_KRX_FUND_VARIANTS = [
+    ("MDC0201020506", {"searchType": "1", "share": "1"}),
+    ("MDC0201020506", {"share": "1"}),
+    ("MDC0201020506", {"searchType": "1", "share": "1", "strtDd": "", "endDd": "",
+                       "isuCd": "", "isuCd2": ""}),
+    ("MDC0201", {"searchType": "1", "share": "1"}),
+]
+
+
+def _krx_prime(menu_id):
+    """해당 통계 화면을 한 번 열어 세션 쿠키를 그 화면에 맞춘다."""
+    s = _krx_session()
+    for u in (f"{_KRX_REF}?menuId={menu_id}", _KRX_REF):
+        try:
+            s.get(u, timeout=20)
+        except Exception:
+            pass
+    return s
+
+
+def krx_fundamental(day=None, _variant=None):
     """전종목 PER/EPS/PBR/BPS/DPS/배당수익률 (MDCSTAT03501)."""
+    global _KRX_SESS
     days = [day] if day else list(_krx_business_days(10))
-    note = ""
-    for d in days:
-        out = {}
-        for mkt in ("STK", "KSQ"):
-            try:
-                js = _krx_post("dbms/MDC/STAT/standard/MDCSTAT03501",
-                               mktId=mkt, trdDd=d, searchType="1")
-            except Exception as e:
-                return {}, f"({mkt} {type(e).__name__}:{str(e)[:50]})"
-            for row in _krx_rows(js):
-                code = str(row.get("ISU_SRT_CD") or "").zfill(6)
-                if not code or code in out:
-                    continue
-                out[code] = {
-                    "eps": _krx_num(row.get("EPS")),
-                    "per": _krx_num(row.get("PER")),
-                    "bps": _krx_num(row.get("BPS")),
-                    "pbr": _krx_num(row.get("PBR")),
-                    "dps": _krx_num(row.get("DPS")),
-                    "dvd": _krx_num(row.get("DVD_YLD")),
-                }
-        if out:
-            return out, f"(기준일 {d}, {len(out)}종목)"
-    return {}, note or "(모든 날짜 빈결과)"
+    variants = [_variant] if _variant else _KRX_FUND_VARIANTS
+    notes = []
+    for menu_id, extra in variants:
+        _KRX_SESS = None                 # 화면별로 세션을 새로 잡는다
+        _krx_prime(menu_id)
+        for d in days:
+            out, err = {}, ""
+            for mkt in ("STK", "KSQ"):
+                try:
+                    js = _krx_post("dbms/MDC/STAT/standard/MDCSTAT03501",
+                                   mktId=mkt, trdDd=d, **extra)
+                except Exception as e:
+                    err = f"{type(e).__name__}:{str(e)[:44]}"
+                    break
+                for row in _krx_rows(js):
+                    code = str(row.get("ISU_SRT_CD") or "").zfill(6)
+                    if not code or code in out:
+                        continue
+                    out[code] = {
+                        "eps": _krx_num(row.get("EPS")),
+                        "per": _krx_num(row.get("PER")),
+                        "bps": _krx_num(row.get("BPS")),
+                        "pbr": _krx_num(row.get("PBR")),
+                        "dps": _krx_num(row.get("DPS")),
+                        "dvd": _krx_num(row.get("DVD_YLD")),
+                    }
+            if out:
+                return out, f"(기준일 {d}, menu {menu_id}, {len(out)}종목)"
+            if err:
+                notes.append(f"{menu_id}:{err}")
+                break                     # 같은 변형으로 날짜만 바꿔도 소용없다
+        else:
+            notes.append(f"{menu_id}:모든날짜빈결과")
+    return {}, "(" + " / ".join(notes[:4]) + ")"
+
+
+def load_fundamental_file():
+    """로컬에서 뽑아 커밋해 둔 실적(output/consensus_kr.json)의 EPS·BPS.
+    EPS·BPS 는 분기에 한 번만 바뀌므로, 주가만 매일 나눠 주면 PER·PBR 이 최신이 된다."""
+    m, note = load_consensus_kr()
+    if not m:
+        return {}, note
+    out = {}
+    for code, v in m.items():
+        eps, bps = v.get("eps"), v.get("bps")
+        if eps is None and bps is None:
+            continue
+        out[code] = {"eps": eps, "bps": bps, "dps": v.get("dps"),
+                     "per": None, "pbr": None, "dvd": v.get("dvd")}
+    return out, note
 
 
 def krx_per_history(months=12):
@@ -897,6 +946,9 @@ def attach_valuation(market, rows):
             notes.append(f"KRX실적=예외:{type(e).__name__}:{str(e)[:50]}")
         fwd, fnote = load_consensus_kr()
         notes.append(f"컨센서스={fnote}")
+        if not fund:      # KRX 가 막히면 커밋해 둔 EPS·BPS 로 주가에서 직접 계산
+            fund, bnote = load_fundamental_file()
+            notes.append(f"파일실적={len(fund)}종목({bnote})")
         if fund and os.getenv("PER_BAND", "1") != "0":
             try:
                 hist, hnote = krx_per_history()
@@ -922,6 +974,13 @@ def attach_valuation(market, rows):
         f = fund.get(r["ticker"]) or {}
         per, pbr = pick(f, "per"), pick(f, "pbr")
         eps, bps = pick(f, "eps"), pick(f, "bps")
+        px = r.get("price")
+        if per is None and eps and eps > 0 and px:
+            per = px / eps                      # 커밋된 EPS + 오늘 주가
+        if pbr is None and bps and bps > 0 and px:
+            pbr = px / bps
+        if pick(f, "dvd") is None and pick(f, "dps") and px:
+            f = dict(f, dvd=pick(f, "dps") / px * 100)
         r["per"] = _r(per) if per and per > 0 else None       # 적자(음수 PER)는 의미가 없어 비움
         r["pbr"] = _r(pbr) if pbr and pbr > 0 else None
         r["eps"] = _r(eps, 0)
