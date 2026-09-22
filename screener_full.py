@@ -1033,6 +1033,7 @@ def attach_valuation(market, rows):
 
 
 SERIES_DAYS = int(os.getenv("SERIES_DAYS", "250"))
+OHLC_DAYS   = int(os.getenv("OHLC_DAYS", "150"))   # 캔들로 그릴 구간
 
 
 def build_series(market, data, rows):
@@ -1052,21 +1053,41 @@ def build_series(market, data, rows):
     def enc_close(v):
         return str(int(round(v))) if abs(v) >= 100 else str(round(float(v), 2))
 
+    def enc_delta(v, base):
+        """시가·고가·저가는 종가와의 차이만 싣는다 — 자릿수가 3~4 로 줄어 용량이 1/2 이하."""
+        d = v - base
+        return str(int(round(d))) if abs(base) >= 100 else str(round(float(d), 2))
+
     out = {}
     for t, d in data.items():
         if t not in keep or len(d) < 60:
             continue
-        c = d["Close"].astype(float).iloc[-SERIES_DAYS:]
-        v = d["Volume"].astype(float).iloc[-SERIES_DAYS:]
-        c = c[np.isfinite(c)]
+        w = d.iloc[-SERIES_DAYS:]
+        c = w["Close"].astype(float)
+        ok = np.isfinite(c)
+        w, c = w[ok], c[ok]
         if len(c) < 60:
             continue
-        v = v.reindex(c.index).fillna(0)
-        out[t] = {
+        v = w["Volume"].astype(float).fillna(0)
+        o = w["Open"].astype(float)
+        h = w["High"].astype(float)
+        l = w["Low"].astype(float)
+        k = min(OHLC_DAYS, len(c))
+        rec = {
             "c": ",".join(enc_close(x) for x in c),
             "v": ",".join(str(int(round(x / 1000))) for x in v),   # 천주 단위
         }
-    return {"market": market, "dates": dates, "days": SERIES_DAYS,
+        cs = c.iloc[-k:]
+        for key, ser in (("o", o), ("h", h), ("l", l)):
+            sv = ser.iloc[-k:]
+            vals = []
+            for i in range(k):
+                x, base = sv.iloc[i], cs.iloc[i]
+                vals.append(enc_delta(x, base) if np.isfinite(x) else "0")
+            rec[key] = ",".join(vals)
+        rec["k"] = k
+        out[t] = rec
+    return {"market": market, "dates": dates, "days": SERIES_DAYS, "ohlc_days": OHLC_DAYS,
             "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
             "count": len(out), "s": out}
 
