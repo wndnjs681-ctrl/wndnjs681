@@ -254,6 +254,19 @@ SCHEMA = [
     dict(key="bb_pctb",  label="%B (밴드 내 위치)",             type="num", unit="%", group="변동성", better="none", decimals=1),
     dict(key="bb_width", label="밴드폭(수축도)",                type="num", unit="%", group="변동성", better="low"),
     dict(key="atr20",    label="ATR(20)",                       type="num", unit="%", group="변동성", better="none"),
+    # 밸류에이션 — 적자 종목은 PER 이 비어 있다(음수 PER 은 해석이 불가능해 제외)
+    dict(key="per",        label="PER",                type="num", unit="배", group="밸류에이션", better="low",  decimals=1),
+    dict(key="fwd_per",    label="선행 PER(12M)",      type="num", unit="배", group="밸류에이션", better="low",  decimals=1),
+    dict(key="pbr",        label="PBR",                type="num", unit="배", group="밸류에이션", better="low",  decimals=2),
+    dict(key="roe",        label="ROE",                type="num", unit="%",  group="밸류에이션", better="high", decimals=1),
+    dict(key="dvd_yld",    label="배당수익률",          type="num", unit="%",  group="밸류에이션", better="high", decimals=2),
+    dict(key="eps_growth", label="EPS 증가율(선행/후행)", type="num", unit="%", group="밸류에이션", better="high", decimals=1),
+    dict(key="per_vs_sec", label="업종 대비 PER",       type="num", unit="%",  group="밸류에이션", better="low",  decimals=0),
+    dict(key="pbr_vs_sec", label="업종 대비 PBR",       type="num", unit="%",  group="밸류에이션", better="low",  decimals=0),
+    dict(key="per_pos",    label="52주 PER 밴드 위치",  type="num", unit="%",  group="밸류에이션", better="low",  decimals=1),
+    dict(key="eps",        label="EPS",                type="num", unit="",   group="밸류에이션", better="high", decimals=0),
+    dict(key="bps",        label="BPS",                type="num", unit="",   group="밸류에이션", better="high", decimals=0),
+    dict(key="fwd_eps",    label="선행 EPS(12M)",      type="num", unit="",   group="밸류에이션", better="high", decimals=0),
 ]
 
 
@@ -588,6 +601,64 @@ def krx_market_data():
     return {}, note or "(모든 날짜 빈결과)"
 
 
+def krx_fundamental(day=None):
+    """전종목 PER/EPS/PBR/BPS/DPS/배당수익률 (MDCSTAT03501)."""
+    days = [day] if day else list(_krx_business_days(10))
+    note = ""
+    for d in days:
+        out = {}
+        for mkt in ("STK", "KSQ"):
+            try:
+                js = _krx_post("dbms/MDC/STAT/standard/MDCSTAT03501",
+                               mktId=mkt, trdDd=d, searchType="1")
+            except Exception as e:
+                return {}, f"({mkt} {type(e).__name__}:{str(e)[:50]})"
+            for row in _krx_rows(js):
+                code = str(row.get("ISU_SRT_CD") or "").zfill(6)
+                if not code or code in out:
+                    continue
+                out[code] = {
+                    "eps": _krx_num(row.get("EPS")),
+                    "per": _krx_num(row.get("PER")),
+                    "bps": _krx_num(row.get("BPS")),
+                    "pbr": _krx_num(row.get("PBR")),
+                    "dps": _krx_num(row.get("DPS")),
+                    "dvd": _krx_num(row.get("DVD_YLD")),
+                }
+        if out:
+            return out, f"(기준일 {d}, {len(out)}종목)"
+    return {}, note or "(모든 날짜 빈결과)"
+
+
+def krx_per_history(months=12):
+    """월 1회 스냅샷으로 최근 1년치 PER 을 모아 밴드 위치를 계산할 재료를 만든다.
+    EPS 가 분기마다 바뀌므로, 주가 밴드와 달리 PER 밴드는 독립적인 정보를 준다."""
+    hist, taken = {}, []
+    now = datetime.now(KST)
+    for k in range(1, months + 1):
+        target = now - timedelta(days=30 * k)
+        got = None
+        for back in range(0, 6):          # 휴장이면 직전 영업일로
+            d = (target - timedelta(days=back)).strftime("%Y%m%d")
+            try:
+                snap, _ = krx_fundamental(d)
+            except Exception:
+                snap = {}
+            if snap:
+                got = (d, snap)
+                break
+        if not got:
+            continue
+        d, snap = got
+        taken.append(d)
+        for code, v in snap.items():
+            per = v.get("per")
+            if per and np.isfinite(per) and per > 0:
+                hist.setdefault(code, []).append(per)
+        time.sleep(0.2)
+    return hist, f"({len(taken)}개월치: {','.join(taken[:3])}…)" if taken else "(수집 실패)"
+
+
 def _sector_from_krx():
     """KRX 업종분류 현황(MDCSTAT03901). 휴장이면 직전 영업일까지 되짚는다."""
     note, m = "", {}
@@ -723,6 +794,74 @@ def universe_us():
     return u.drop_duplicates("ticker").head(MAX_US).reset_index(drop=True)
 
 
+def yahoo_fundamentals(symbols):
+    """Yahoo quote 배치 조회로 미국 종목의 PER·선행PER·PBR·배당수익률·BPS 를 받는다."""
+    import requests
+    s = requests.Session()
+    s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"})
+    crumb = ""
+    try:
+        s.get("https://fc.yahoo.com", timeout=15)
+        r = s.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=15)
+        crumb = (r.text or "").strip()
+    except Exception as e:
+        return {}, [f"crumb 실패:{type(e).__name__}"]
+    if not crumb or len(crumb) > 40:
+        return {}, [f"crumb 이상:{crumb[:30]!r}"]
+
+    FIELDS = ("trailingPE,forwardPE,priceToBook,epsTrailingTwelveMonths,epsForward,"
+              "bookValue,trailingAnnualDividendYield,dividendYield,marketCap")
+    out, notes, bad = {}, [], 0
+    syms = list(symbols)
+    for i in range(0, len(syms), 50):
+        chunk = syms[i:i + 50]
+        try:
+            r = s.get("https://query1.finance.yahoo.com/v7/finance/quote", timeout=30,
+                      params={"symbols": ",".join(chunk), "crumb": crumb, "fields": FIELDS})
+            js = r.json()
+        except Exception as e:
+            bad += 1
+            if bad <= 2:
+                notes.append(f"배치{i//50}:{type(e).__name__}")
+            continue
+        for q in (js.get("quoteResponse", {}).get("result") or []):
+            sym = q.get("symbol")
+            if not sym:
+                continue
+            dy = q.get("dividendYield")
+            if dy is not None and dy < 1:      # 비율로 오는 경우가 있어 % 로 맞춘다
+                dy *= 100
+            out[sym] = {
+                "per": q.get("trailingPE"),
+                "fwd_per": q.get("forwardPE"),
+                "pbr": q.get("priceToBook"),
+                "eps": q.get("epsTrailingTwelveMonths"),
+                "fwd_eps": q.get("epsForward"),
+                "bps": q.get("bookValue"),
+                "dvd": dy if dy is not None else q.get("trailingAnnualDividendYield"),
+                "mcap": (q.get("marketCap") / 1e6) if q.get("marketCap") else None,
+            }
+        time.sleep(0.25)
+    notes.insert(0, f"{len(out)}/{len(syms)}종목")
+    return out, notes
+
+
+def load_consensus_kr():
+    """로컬에서 뽑아 커밋해 둔 국내 컨센서스(output/consensus_kr.json)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "output", "consensus_kr.json")
+    if not os.path.exists(path):
+        return {}, "파일없음"
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception as e:
+        return {}, f"읽기실패:{type(e).__name__}"
+    m = d.get("map") or {}
+    return m, f"{len(m)}종목(생성 {str(d.get('generated_at'))[:10]})"
+
+
 def previous_universe(market):
     """직전 산출물에서 종목 목록을 복원한다 (리스팅 조회가 깨졌을 때의 안전망)."""
     path = f"output/universe_{market}.json"
@@ -743,6 +882,94 @@ def previous_universe(market):
         "value": r.get("value"),
         "sector": r.get("sector", ""),
     } for r in rows if r.get("ticker")])
+
+
+def attach_valuation(market, rows):
+    """실적 기반 밸류에이션을 붙인다. 실패해도 나머지 지표는 그대로 살린다."""
+    notes = []
+    fund, fwd, hist = {}, {}, {}
+
+    if market == "kr":
+        try:
+            fund, note = krx_fundamental()
+            notes.append(f"KRX실적={len(fund)}종목{note}")
+        except Exception as e:
+            notes.append(f"KRX실적=예외:{type(e).__name__}:{str(e)[:50]}")
+        fwd, fnote = load_consensus_kr()
+        notes.append(f"컨센서스={fnote}")
+        if fund and os.getenv("PER_BAND", "1") != "0":
+            try:
+                hist, hnote = krx_per_history()
+                notes.append(f"PER이력={len(hist)}종목{hnote}")
+            except Exception as e:
+                notes.append(f"PER이력=예외:{type(e).__name__}:{str(e)[:50]}")
+    else:
+        try:
+            fund, ynotes = yahoo_fundamentals([r["ticker"] for r in rows])
+            notes.append("Yahoo=" + " ".join(ynotes))
+        except Exception as e:
+            notes.append(f"Yahoo=예외:{type(e).__name__}:{str(e)[:50]}")
+
+    def pick(d, k):
+        v = d.get(k)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return v if np.isfinite(v) and v != 0 else None
+
+    for r in rows:
+        f = fund.get(r["ticker"]) or {}
+        per, pbr = pick(f, "per"), pick(f, "pbr")
+        eps, bps = pick(f, "eps"), pick(f, "bps")
+        r["per"] = _r(per) if per and per > 0 else None       # 적자(음수 PER)는 의미가 없어 비움
+        r["pbr"] = _r(pbr) if pbr and pbr > 0 else None
+        r["eps"] = _r(eps, 0)
+        r["bps"] = _r(bps, 0)
+        r["dvd_yld"] = _r(pick(f, "dvd"))
+        # ROE = EPS / BPS — KRX·Yahoo 둘 다 같은 정의로 계산된다
+        r["roe"] = _r(eps / bps * 100) if eps is not None and bps and bps > 0 else None
+        if market == "us" and pick(f, "mcap") and not r.get("mcap"):
+            r["mcap"] = _r(pick(f, "mcap"), 0)
+
+        # 12개월 선행
+        if market == "us":
+            fp, fe = pick(f, "fwd_per"), pick(f, "fwd_eps")
+        else:
+            c = fwd.get(r["ticker"]) or {}
+            fe = pick(c, "fwd_eps")
+            fp = pick(c, "fwd_per")
+            if fp is None and fe and fe > 0 and r.get("price"):
+                fp = r["price"] / fe
+        r["fwd_per"] = _r(fp) if fp and fp > 0 else None
+        r["fwd_eps"] = _r(fe, 0)
+        # 이익 개선폭: 선행 EPS 가 후행 EPS 대비 얼마나 늘어나는가
+        r["eps_growth"] = (_r((fe / eps - 1) * 100)
+                           if fe is not None and eps and eps > 0 else None)
+
+        # 52주 PER 밴드 내 위치
+        hs = hist.get(r["ticker"]) or []
+        if r["per"] and len(hs) >= 4:
+            lo, hi = min(hs + [r["per"]]), max(hs + [r["per"]])
+            r["per_pos"] = _r((r["per"] - lo) / (hi - lo) * 100, 1) if hi > lo else None
+        else:
+            r["per_pos"] = None
+
+    # 업종 대비 (같은 업종 중앙값 = 100)
+    for key, out in (("per", "per_vs_sec"), ("pbr", "pbr_vs_sec")):
+        by = {}
+        for r in rows:
+            if r.get(key):
+                by.setdefault(r["sector"], []).append(r[key])
+        med = {k: sorted(v)[len(v) // 2] for k, v in by.items() if len(v) >= 3}
+        for r in rows:
+            m = med.get(r["sector"])
+            r[out] = _r(r[key] / m * 100) if r.get(key) and m else None
+
+    filled = sum(1 for r in rows if r.get("per") is not None)
+    notes.append(f"PER채움={filled}/{len(rows)}")
+    print(f"[{market}] 밸류에이션: " + " | ".join(notes))
+    return notes
 
 
 def run_market(market, uni):
@@ -799,6 +1026,12 @@ def run_market(market, uni):
         r["sector"] = k if k and cnt.get(k, 0) >= 3 else ("기타" if k else "미분류")
     print(f"[{market}] 섹터 {len(set(r['sector'] for r in rows))}개")
 
+    try:
+        DIAG[market + "_valuation"] = attach_valuation(market, rows)
+    except Exception as e:
+        traceback.print_exc()
+        DIAG[market + "_valuation"] = [f"전체실패:{type(e).__name__}:{str(e)[:80]}"]
+
     # 미국은 시총·거래대금 단위가 백만달러
     sch = [dict(s) for s in SCHEMA]
     if market == "us":
@@ -825,7 +1058,7 @@ def run_market(market, uni):
         "count": len(rows),
         "failed": failed,
         "params": {"bb_len": BB_LEN, "bb_k": BB_K},
-        "diag": DIAG.get(market + "_sector", []),
+        "diag": DIAG.get(market + "_sector", []) + DIAG.get(market + "_valuation", []),
         "schema": sch,
         "rows": rows,
     }
@@ -872,9 +1105,36 @@ def self_test():
     assert list(obv_series(pd.Series([10, 11, 10, 12, 12.]),
                            pd.Series([100, 200, 300, 400, 500.]))) == [0, 200, -100, 300, 300]
     keys = {s["key"] for s in SCHEMA}
-    missing = keys - set(m.keys()) - {"mcap", "value"}
+    VALUATION = {"per", "fwd_per", "pbr", "roe", "dvd_yld", "eps_growth",
+                 "per_vs_sec", "pbr_vs_sec", "per_pos", "eps", "bps", "fwd_eps"}
+    missing = keys - set(m.keys()) - {"mcap", "value"} - VALUATION
     assert not missing, f"SCHEMA 에 있으나 계산되지 않는 지표: {missing}"
-    print("self-test OK (8 cases)")
+    # 밸류에이션 결합 — 적자·결측·업종 대비가 의도대로 처리되는지
+    rows = [
+        {"ticker": "A", "sector": "반도체", "price": 1000.0},
+        {"ticker": "B", "sector": "반도체", "price": 2000.0},
+        {"ticker": "C", "sector": "반도체", "price": 3000.0},
+        {"ticker": "D", "sector": "반도체", "price": 4000.0},
+    ]
+    fake = {"A": {"per": 10, "pbr": 1.0, "eps": 100, "bps": 1000, "dvd": 2.0},
+            "B": {"per": 20, "pbr": 2.0, "eps": 100, "bps": 1000, "dvd": 0},
+            "C": {"per": -5, "pbr": 3.0, "eps": -50, "bps": 1000, "dvd": 0},
+            "D": {"per": 30, "pbr": 4.0, "eps": 133, "bps": 1000, "dvd": 1.0}}
+    _orig = globals()["krx_fundamental"]
+    globals()["krx_fundamental"] = lambda day=None: (fake, "(테스트)")
+    os.environ["PER_BAND"] = "0"
+    try:
+        attach_valuation("kr", rows)
+    finally:
+        globals()["krx_fundamental"] = _orig
+    assert rows[2]["per"] is None, "적자 종목의 PER 이 남아 있음"
+    assert rows[0]["roe"] == 10.0, rows[0]["roe"]
+    assert rows[1]["per_vs_sec"] == 100.0, rows[1]["per_vs_sec"]   # 중앙값 20배
+    assert rows[3]["per_vs_sec"] == 150.0, rows[3]["per_vs_sec"]
+    assert rows[2]["per_vs_sec"] is None
+    assert rows[0]["dvd_yld"] == 2.0 and rows[1]["dvd_yld"] is None
+
+    print("self-test OK (9 cases)")
 
 
 def main():
