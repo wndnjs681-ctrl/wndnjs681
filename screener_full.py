@@ -292,9 +292,44 @@ def _col(df, *names):
 DIAG = {}
 
 
+def _sector_from_file():
+    """리포에 커밋해 둔 업종 매핑(output/sector_map_kr.json)을 읽는다.
+
+    KRX·네이버는 깃허브 액션 러너 IP 를 막기 때문에 액션 안에서는 업종을
+    받을 수 없다. make_sector_map.py 를 내 PC 에서 한 번 돌려 만든 이 파일이
+    있으면 외부 접속 없이 업종이 채워진다."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "output", "sector_map_kr.json")
+    if not os.path.exists(path):
+        return {}, "(파일 없음)"
+    try:
+        with open(path, encoding="utf-8") as f:
+            js = json.load(f)
+    except Exception as e:
+        return {}, f"(읽기 실패 {type(e).__name__}:{str(e)[:40]})"
+    raw = js.get("map") or {}
+    m = {}
+    for k, v in raw.items():
+        code, nm = str(k).zfill(6), _safe_str(v)
+        if code and nm:
+            m[code] = nm
+    return m, f"(생성 {js.get('generated_at', '?')[:10]}, 출처 {js.get('source', '?')})"
+
+
 def kr_sector_map(tickers):
     """국내 업종(섹터) 매핑. 여러 경로를 순서대로 시도하고 진단 로그를 함께 돌려준다."""
     diag, best, best_hit = [], {}, 0
+
+    # (0) 리포에 커밋된 업종 매핑 — 액션에서 외부 접속이 막혀도 이건 항상 읽힌다
+    fm, fnote = _sector_from_file()
+    if fm:
+        hit = sum(1 for t in tickers if t in fm)
+        diag.append(f"FILE={hit}/{len(tickers)}{fnote}")
+        best, best_hit = fm, hit
+        if best_hit >= len(tickers) * 0.6:
+            return best, diag
+    else:
+        diag.append(f"FILE=0{fnote}")
 
     # (1) FinanceDataReader 상세 리스팅들
     for src in ("KRX-DESC", "KRX", "KOSPI", "KOSDAQ"):
