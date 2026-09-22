@@ -366,9 +366,21 @@ def _sector_from_naver():
     import requests
     H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     BASE = "https://finance.naver.com"
-    r = requests.get(BASE + "/sise/sise_group.naver?type=upjong", headers=H, timeout=30)
-    html = r.content.decode("euc-kr", "ignore")
+    def _get(u):
+        """네이버가 EUC-KR 에서 UTF-8 로 바뀌어도 읽히도록 인코딩을 자동 판별한다."""
+        b = requests.get(u, headers=H, timeout=30).content
+        for enc in ("euc-kr", "cp949", "utf-8"):
+            try:
+                return b.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return b.decode("utf-8", "ignore")
+
+    html = _get(BASE + "/sise/sise_group.naver?type=upjong")
     links = re.findall(r'href="([^"]*sise_group_detail[^"]*)"[^>]*>(.*?)</a>', html, re.S)
+    if not links:   # 페이지 개편 대비 — 링크 태그 모양이 달라져도 no= 와 라벨만 건진다
+        links = [(f"no={no}", lab) for no, lab in
+                 re.findall(r'type=upjong&(?:amp;)?no=(\d+)[^>]*>\s*([^<]{1,40})', html)]
     groups = []
     seen = set()
     for href, label in links:
@@ -383,9 +395,7 @@ def _sector_from_naver():
         raise RuntimeError(f"업종 목록 파싱 실패(len={len(html)}) 조각={snip!r}"[:420])
     m = {}
     for no, nm in groups:
-        d = requests.get(f"{BASE}/sise/sise_group_detail.naver?type=upjong&no={no}",
-                         headers=H, timeout=30)
-        dh = d.content.decode("euc-kr", "ignore")
+        dh = _get(f"{BASE}/sise/sise_group_detail.naver?type=upjong&no={no}")
         for code in re.findall(r'code=(\d{6})', dh):
             m.setdefault(code, nm)
         time.sleep(0.12)
@@ -403,7 +413,7 @@ def _sector_from_pykrx():
         from pykrx import stock
 
     day = None
-    for back in range(0, 8):
+    for back in range(0, 15):
         d = (datetime.now(KST) - timedelta(days=back)).strftime("%Y%m%d")
         try:
             if len(stock.get_index_ticker_list(date=d, market="KOSPI")):
@@ -438,32 +448,123 @@ def _sector_from_pykrx():
     return m
 
 
-def _sector_from_krx():
-    """KRX 업종분류 현황. 오늘이 휴장이면 직전 영업일까지 되짚는다."""
+# ── KRX 데이터포털 공통 세션 ────────────────────────────────
+# data.krx.co.kr 은 쿠키 없이 getJsonData.cmd 로 POST 하면 본문에 'LOGOUT' 을
+# 돌려준다(HTTP 400). 로더 페이지를 먼저 GET 해서 세션 쿠키를 받아두고,
+# 그 세션으로만 POST 한다. 쿠키가 만료되면 한 번 재발급 후 재시도한다.
+_KRX_SESS = None
+_KRX_URL = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+_KRX_REF = "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd"
+
+
+def _krx_session(fresh=False):
+    global _KRX_SESS
+    if _KRX_SESS is not None and not fresh:
+        return _KRX_SESS
     import requests
-    url = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-    H = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Referer": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd",
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+        "Referer": _KRX_REF,
+        "Origin": "https://data.krx.co.kr",
         "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    }
+    })
+    for u in (_KRX_REF + "?menuId=MDC0201", "https://data.krx.co.kr/"):
+        try:
+            s.get(u, timeout=20)
+        except Exception:
+            pass
+    _KRX_SESS = s
+    return s
+
+
+def _krx_post(bld, **data):
+    """KRX getJsonData 호출. 쿠키 문제면 세션을 새로 받아 한 번 더 시도한다."""
+    global _KRX_SESS
+    payload = {"bld": bld, "locale": "ko_KR", "csvxls_isNo": "false", "money": "1"}
+    payload.update(data)
+    last = ""
+    for attempt in (0, 1):
+        s = _krx_session(fresh=(attempt == 1))
+        try:
+            r = s.post(_KRX_URL, data=payload, timeout=30)
+        except Exception as e:
+            last = f"{type(e).__name__}:{str(e)[:50]}"
+            continue
+        txt = (r.text or "").strip()
+        if txt.startswith("{") or txt.startswith("["):
+            try:
+                return r.json()
+            except Exception as e:
+                last = f"JSON파싱:{str(e)[:40]}"
+                continue
+        last = f"비JSON {r.status_code}: {txt[:60]!r}"
+        _KRX_SESS = None          # 쿠키 재발급 유도
+    raise RuntimeError(last or "KRX 응답 없음")
+
+
+def _krx_rows(js):
+    return js.get("block1") or js.get("OutBlock_1") or js.get("output") or []
+
+
+def _krx_num(v):
+    """'1,234,567' → 1234567.0, 빈값/'-' → nan"""
+    t = str(v or "").replace(",", "").strip()
+    if not t or t in ("-", "N/A"):
+        return float("nan")
+    try:
+        return float(t)
+    except Exception:
+        return float("nan")
+
+
+def _krx_business_days(n=10):
+    for back in range(n):
+        yield (datetime.now(KST) - timedelta(days=back)).strftime("%Y%m%d")
+
+
+def krx_market_data():
+    """전종목 시세(MDCSTAT01501)로 시가총액·거래대금·시장구분을 받는다.
+    FinanceDataReader 의 KRX 리스팅에서 Marcap/Amount 컬럼이 사라졌을 때의 대체 경로."""
+    note = ""
+    for day in _krx_business_days(10):
+        out = {}
+        for mkt in ("STK", "KSQ"):
+            try:
+                js = _krx_post("dbms/MDC/STAT/standard/MDCSTAT01501",
+                               mktId=mkt, trdDd=day, share="1")
+            except Exception as e:
+                note = f"({mkt} {type(e).__name__}:{str(e)[:50]})"
+                return {}, note
+            for row in _krx_rows(js):
+                code = str(row.get("ISU_SRT_CD") or "").zfill(6)
+                if not code or code in out:   # 시장 간 중복 시 먼저 받은 쪽을 남긴다
+                    continue
+                out[code] = {
+                    "mcap": _krx_num(row.get("MKTCAP")) / 1e8,        # 억원
+                    "value": _krx_num(row.get("ACC_TRDVAL")) / 1e8,   # 억원
+                    "seg": "KOSPI" if mkt == "STK" else "KOSDAQ",
+                }
+        if out:
+            return out, f"(기준일 {day}, {len(out)}종목)"
+    return {}, note or "(모든 날짜 빈결과)"
+
+
+def _sector_from_krx():
+    """KRX 업종분류 현황(MDCSTAT03901). 휴장이면 직전 영업일까지 되짚는다."""
     note, m = "", {}
-    for back in range(0, 6):
-        day = (datetime.now(KST) - timedelta(days=back)).strftime("%Y%m%d")
+    for day in _krx_business_days(6):
         m = {}
         for mkt in ("STK", "KSQ"):
-            r = requests.post(url, headers=H, timeout=30, data={
-                "bld": "dbms/MDC/STAT/standard/MDCSTAT03901",
-                "mktId": mkt, "trdDd": day, "money": "1", "csvxls_isNo": "false",
-            })
             try:
-                js = r.json()
-            except Exception:
-                note = f"(비JSON {r.status_code}: {r.text[:60]!r})"
-                return {}, note
-            rows = js.get("block1") or js.get("OutBlock_1") or js.get("output") or []
-            for row in rows:
+                js = _krx_post("dbms/MDC/STAT/standard/MDCSTAT03901",
+                               mktId=mkt, trdDd=day)
+            except Exception as e:
+                return {}, f"({mkt} {type(e).__name__}:{str(e)[:60]})"
+            for row in _krx_rows(js):
                 code = str(row.get("ISU_SRT_CD") or row.get("ISU_CD") or "").zfill(6)
                 nm = str(row.get("IDX_IND_NM") or row.get("SECT_TP_NM") or "").strip()
                 if code and nm:
@@ -495,6 +596,30 @@ def universe_kr():
                       if c is not None and v is not None else np.nan)
     mk = _col(df, "Market", "시장구분")
     u["market_seg"] = mk.astype(str) if mk is not None else ""
+
+    # FDR 의 KRX 리스팅에서 Marcap/Amount 컬럼이 사라지면 시총 필터가 통째로
+    # 무력화돼 유니버스가 KONEX 까지 부풀고 mcap 이 스키마에서 빠진다.
+    # 그때는 KRX 전종목 시세로 메운다.
+    need_cap = not u["mcap"].notna().any()
+    need_val = not u["value"].notna().any()
+    if need_cap or need_val:
+        try:
+            md, mnote = krx_market_data()
+        except Exception as e:
+            md, mnote = {}, f"(예외 {type(e).__name__}:{str(e)[:50]})"
+        DIAG["kr_market"] = [f"KRX-시세={len(md)}종목{mnote}"]
+        print("시총/거래대금 보완: " + DIAG["kr_market"][0])
+        if md:
+            if need_cap:
+                u["mcap"] = u["ticker"].map(lambda t: md.get(t, {}).get("mcap", np.nan))
+            if need_val:
+                u["value"] = u["ticker"].map(lambda t: md.get(t, {}).get("value", np.nan))
+            blank_seg = u["market_seg"].isin(["", "nan", "None"])
+            u.loc[blank_seg, "market_seg"] = u.loc[blank_seg, "ticker"].map(
+                lambda t: md.get(t, {}).get("seg", ""))
+
+    # KONEX 는 거래가 거의 없어 지표가 의미를 갖지 못한다 — 유니버스에서 제외
+    u = u[~u["market_seg"].str.upper().str.contains("KONEX|코넥스", na=False)]
 
     smap, diag = kr_sector_map(set(u["ticker"]))
     DIAG["kr_sector"] = diag
