@@ -1180,9 +1180,21 @@ def run_market(market, uni):
                 print(f"[{market}] 스키마에서 제외: {s['label']} (채움률 {filled/len(rows)*100:.0f}%)")
         sch = keep
 
+    # 기준일은 실행일이 아니라 실제 마지막 봉의 날짜여야 한다.
+    # 장 시작 전(아침 07:40 실행)에는 마지막 봉이 전 영업일이므로,
+    # END(오늘)를 쓰면 전일 종가에 오늘 날짜가 붙어 "종가가 안 바뀐다" 로 보인다.
+    last_day = END
+    try:
+        ends = [d.index[-1] for t, d in data.items() if t in {r["ticker"] for r in rows} and len(d)]
+        if ends:
+            last_day = max(ends).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
     return {
         "market": market,
-        "date": END,
+        "date": last_day,
+        "run_at": END,
         "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
         "count": len(rows),
         "failed": failed,
