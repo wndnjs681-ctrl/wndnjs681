@@ -41,10 +41,21 @@ jobs:
         run: python event_arb.py
 
       - name: Commit output
+        # 수집 중(7~8분)에 다른 실행이나 스크리너가 main 에 먼저 푸시해도 충돌하지 않도록
+        # 새 결과 파일만 따로 빼 두고, 최신 main 위에 얹어 커밋한다. 푸시 경합 시 3번까지 재시도.
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add output/events_kr.json
-          git diff --staged --quiet || git commit -m "event-arb: $(date -u +%Y-%m-%d\ %H:%M) UTC"
-          git pull --rebase --autostash || true
-          git push
+          cp output/events_kr.json "$RUNNER_TEMP/events_kr.json"
+          for i in 1 2 3; do
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            mkdir -p output
+            cp "$RUNNER_TEMP/events_kr.json" output/events_kr.json
+            git add output/events_kr.json
+            if git diff --staged --quiet; then echo "변경 없음"; exit 0; fi
+            git commit --quiet -m "event-arb: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+            if git push --quiet origin HEAD:main; then echo "푸시 완료 (시도 $i)"; exit 0; fi
+            echo "푸시 경합 — 재시도 $i"; sleep $((i * 5))
+          done
+          exit 1
