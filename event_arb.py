@@ -84,7 +84,10 @@ def dart_doc_text(rcept_no):
     r = _S.get(DART + "document.xml", params={"crtfc_key": KEY, "rcept_no": rcept_no}, timeout=60)
     b = r.content
     if not b[:2] == b"PK":
-        raise RuntimeError(f"원문 zip 아님 ({b[:80]!r})")
+        m = re.search(rb"<message>(.*?)</message>", b, re.S)
+        st = re.search(rb"<status>(.*?)</status>", b, re.S)
+        msg = (st.group(1).decode() + " " + m.group(1).decode("utf-8", "replace")) if m and st else repr(b[:80])
+        raise RuntimeError(f"원문 없음 {msg}")
     parts = []
     with zipfile.ZipFile(io.BytesIO(b)) as z:
         for n in z.namelist():
@@ -216,10 +219,32 @@ def all_dates(s):
     return out
 
 
+def clean_name(s):
+    """공시 속 회사명: 첫 줄만, 영문 병기 괄호·'이하 ~' 주석 제거."""
+    s = str(s or "").strip().splitlines()[0] if str(s or "").strip() else ""
+    s = re.sub(r"\((?=[^)]*[A-Za-z])[^)]*\)?", "", s)          # (Dong-A Pharm Co., Ltd.)
+    s = re.sub(r"\(이하[^)]*\)?", "", s)
+    return re.sub(r"\s+", " ", s).strip(" ,")
+
+
 def norm_name(s):
-    s = str(s or "")
+    s = clean_name(s)
     s = re.sub(r"주식회사|\(주\)|㈜|\(유\)|유한회사|Co\.,?\s*Ltd\.?|Inc\.?|Corp\.?", "", s, flags=re.I)
     return re.sub(r"[\s()\[\]·.,\-]", "", s).upper()
+
+
+def name_positions(text, n1, n2):
+    """비율 문구에서 두 회사명이 나오는 위치 (i1, i2). 한쪽 이름이 다른 쪽에 포함돼도(휴맥스/휴맥스홀딩스) 구분한다."""
+    t, a, b = norm_name(text), norm_name(n1), norm_name(n2)
+    if not a or not b or a == b:
+        return None
+    if a in b:
+        i2 = t.find(b); i1 = t.replace(b, "#" * len(b)).find(a) if i2 >= 0 else -1
+    elif b in a:
+        i1 = t.find(a); i2 = t.replace(a, "#" * len(a)).find(b) if i1 >= 0 else -1
+    else:
+        i1, i2 = t.find(a), t.find(b)
+    return (i1, i2) if i1 >= 0 and i2 >= 0 and i1 != i2 else None
 
 
 def parse_ratio(text, left_name=None, right_name=None):
@@ -233,10 +258,9 @@ def parse_ratio(text, left_name=None, right_name=None):
         return None
     order = None
     if left_name and right_name:
-        nt = norm_name(t)
-        i, j = nt.find(norm_name(left_name)), nt.find(norm_name(right_name))
-        if i >= 0 and j >= 0 and i != j:
-            order = "as_given" if i < j else "swapped"
+        pos = name_positions(t, left_name, right_name)
+        if pos:
+            order = "as_given" if pos[0] < pos[1] else "swapped"
     return a, b, order
 
 
@@ -377,6 +401,8 @@ def leg(role, name, code, listing, bddd=None):
     sh = (listing.get(code) or {}).get("shares") if code else None
     if code and code in listing:
         name = listing[code]["name"]
+    else:
+        name = clean_name(name)
     return {
         "role": role, "name": name, "code": code,
         "listed": bool(code and code in listing),
@@ -433,7 +459,8 @@ def find_code(name, listing, name_idx):
         return name_idx[n]
     # 부분 일치(길이 3자 이상) — 가장 비슷한 길이를 고른다
     cands = [(abs(len(k) - len(n)), c) for k, c in name_idx.items()
-             if len(n) >= 3 and (n in k or k in n) and len(k) >= 3]
+             if len(n) >= 4 and len(k) >= 4 and (n in k or k in n)
+             and min(len(k), len(n)) / max(len(k), len(n)) >= 0.6]
     return min(cands)[1] if cands else None
 
 
@@ -442,7 +469,7 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
     me_name, me_code = lrow.get("corp_name"), (lrow.get("stock_code") or "").strip() or None
     bddd = pdate(rec.get("bddd")) or pdate(lrow.get("rcept_dt"))
     ratio_txt = rec.get("mg_rt") or rec.get("extr_rt") or rec.get("dvmg_rt") or ""
-    other_name = (rec.get("mgptncmp_cmpnm") or rec.get("extr_tgcmp_cmpnm") or "").strip()
+    other_name = clean_name(rec.get("mgptncmp_cmpnm") or rec.get("extr_tgcmp_cmpnm") or "")
     other_code = find_code(other_name, listing, name_idx)
     if other_code == me_code:
         other_code = None
@@ -456,14 +483,23 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
     }
 
     if kind == "MERGER":
-        surv, gone = me_name, other_name
+        surv, gone, how = me_name, other_name, "제출회사=존속 가정"
+        is_spac = lambda n: bool(re.search(r"스팩|기업인수목적", n or ""))
+        pos = name_positions(ratio_txt, me_name, other_name)
         ab = absorber_from_method(rec.get("mg_mth"))
-        if ab:
+        if is_spac(other_name) and not is_spac(me_name):
+            surv, gone, how = other_name, me_name, "스팩=존속"
+        elif is_spac(me_name):
+            surv, gone, how = me_name, other_name, "스팩=존속"
+        elif pos:
+            surv, gone = (me_name, other_name) if pos[0] < pos[1] else (other_name, me_name)
+            how = "비율 문구 순서(존속:소멸)"
+        elif ab:
             a, b = ab
             if norm_name(other_name) and norm_name(other_name) in norm_name(a):
-                surv, gone = other_name, me_name
+                surv, gone, how = other_name, me_name, "합병방법 문구"
             elif norm_name(me_name) in norm_name(b):
-                surv, gone = other_name, me_name
+                surv, gone, how = other_name, me_name, "합병방법 문구"
         surv_code = me_code if surv == me_name else other_code
         gone_code = other_code if surv == me_name else me_code
         pr = parse_ratio(ratio_txt, surv, gone)
@@ -472,7 +508,7 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
             if order == "swapped":
                 a, b = b, a
             ratio = {"per_target": b / a, "text": ratio_txt.strip()[:300],
-                     "basis": f"소멸 1주당 존속 {b / a:.6g}주 (문구 {a:g}:{b:g}, 존속:소멸 순 가정)"}
+                     "basis": f"소멸 1주당 존속 {b / a:.6g}주 (문구 {a:g}:{b:g}, 방향 판정: {how})"}
         legs.append(leg("target", gone, gone_code, listing, bddd))
         legs.append(leg("acquirer", surv, surv_code, listing, bddd))
         title = f"{legs[0]['name']} → {legs[1]['name']} 흡수합병" if gone else f"{me_name} 합병"
@@ -489,6 +525,11 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
                 a, b = b, a
             ratio = {"per_target": b / a, "text": ratio_txt.strip()[:300],
                      "basis": f"자회사 1주당 모회사 {b / a:.6g}주 (문구 {a:g}:{b:g}, 모:자 순 가정)"}
+        if parent_code and parent_code == child_code:
+            if norm_name(child) == norm_name(me_name):
+                parent_code = None
+            else:
+                child_code = None
         legs.append(leg("target", child, child_code, listing, bddd))
         legs.append(leg("acquirer", parent, parent_code, listing, bddd))
         title = f"{legs[0]['name']} ↔ {legs[1]['name']} 주식{'이전' if '이전' in str(rec.get('extr_sen')) else '교환'}"
@@ -506,6 +547,9 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
     # 매수청구권 — 공시된 매수예정가격 + 법정 산식 추정치
     appraisal = []
     plan_txt = str(rec.get("aprskh_plnprc") or "")
+    no_right_txt = " ".join(str(rec.get(k) or "") for k in ("mg_stn", "aprskh_plnprc", "aprskh_lmt", "aprskh_pym_plpd_mth", "extr_stn", "extr_sen"))
+    no_right = bool(re.search(r"소규모\s*(합병|주식교환|분할합병)|간이\s*(합병|주식교환)|해당\s*사항\s*없|해당\s*없|미해당|적용\s*되지\s*않|부여되지\s*않", no_right_txt))
+    flags["no_appraisal"] = no_right
     plan_nums = [float(x.replace(",", "")) for x in NUM_RE.findall(plan_txt)
                  if float(x.replace(",", "")) >= 100]
     for L in legs:
@@ -519,6 +563,8 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
             # 문구 안에 상대회사 이름과 가격이 같이 있으면 순서대로 배정
         elif not mine and len(plan_nums) >= 2 and norm_name(L["name"]) in norm_name(plan_txt):
             disclosed = plan_nums[1]
+        if no_right and not disclosed:
+            continue
         if disclosed or stat:
             appraisal.append({
                 "code": L["code"], "name": L["name"],
@@ -614,25 +660,36 @@ def build_tenders(rows, listing):
             continue
         first, latest = filings[0], filings[-1]
         after = [k for k, r in items if r.get("rcept_no") > first.get("rcept_no")]
-        status = "진행"
+        terms = {"price": None, "conf": 0}
+        errs = []
+        for f_ in ([latest, first] if latest is not first else [latest]):
+            try:
+                t0 = parse_tender(dart_doc_text(f_["rcept_no"]))
+            except Exception as e:
+                errs.append(f"{f_['rcept_no']}:{str(e)[:50]}")
+                time.sleep(1.0)
+                continue
+            for k2, v in t0.items():
+                if terms.get(k2) in (None, False, 0) and v:
+                    terms[k2] = v
+            terms["conf"] = sum(1 for k3 in ("price", "qty", "start", "end") if terms.get(k3))
+            if terms["conf"] >= 3:
+                break
+        if errs and not terms.get("price"):
+            log(f"공개매수 원문 실패 {latest.get('corp_name')}: " + " / ".join(errs))
+        # 상태: 철회 > 결과보고(마감이 지났을 때만) > 마감 경과 > 진행
+        today = TODAY.isoformat()
+        end = terms.get("end")
         if "TENDER_WITHDRAW" in after:
             status = "철회"
-        elif "TENDER_RESULT" in after:
+        elif "TENDER_RESULT" in after and (not end or end < today):
             status = "종료"
-        terms = {"price": None, "conf": 0}
-        try:
-            terms = parse_tender(dart_doc_text(latest["rcept_no"]))
-            if terms["conf"] < 2 and latest is not first:
-                t0 = parse_tender(dart_doc_text(first["rcept_no"]))
-                for k2, v in t0.items():
-                    if terms.get(k2) in (None, False, 0) and v:
-                        terms[k2] = v
-        except Exception as e:
-            log(f"공개매수 원문 실패 {latest.get('corp_name')}: {type(e).__name__}:{str(e)[:60]}")
+        elif end and end < today:
+            status = "결제대기"
+        else:
+            status = "진행"
         code = (latest.get("stock_code") or "").strip() or None
         bddd = pdate(first.get("rcept_dt"))
-        if status == "진행" and terms.get("end") and terms["end"] < TODAY.isoformat():
-            status = "결제대기"
         dates = [d for d in (
             {"label": "신고서 제출", "date": bddd},
             {"label": "공개매수 시작", "date": terms.get("start")},
@@ -647,6 +704,7 @@ def build_tenders(rows, listing):
             "rcept_dt": pdate(latest.get("rcept_dt")), "bddd": bddd, "reporter": bidder,
             "status": status, "legs": [tl], "ratio": None, "appraisal": [],
             "tender": {**terms, "bidder": bidder,
+                       "filings": [f"{pdate(r.get('rcept_dt'))} {r.get('report_nm')}" for _, r in items][-8:],
                        "competing": len(bidders_per_target.get(cc, ())) > 1,
                        "amendments": len(filings) - 1},
             "dates": sorted(dates, key=lambda d: d["date"]),
@@ -654,6 +712,15 @@ def build_tenders(rows, listing):
             "text": {"report_nm": latest.get("report_nm")},
         })
     return events
+
+
+def spac_listed(code):
+    """상장일을 못 받았으면 시세 첫 거래일로 대신한다 (스팩 존속기한 계산용)."""
+    try:
+        p = load_prices(code, "2018-01-01")
+        return p[0][0].isoformat() if p else None
+    except Exception:
+        return None
 
 
 def build_spacs(listing, merger_events):
@@ -671,7 +738,7 @@ def build_spacs(listing, merger_events):
         if not L["last"]:
             continue
         base = 10000.0 if L["last"] >= 6000 else 2000.0
-        listed = info.get("listed")
+        listed = info.get("listed") or spac_listed(code)
         maturity = None
         if listed:
             try:
@@ -805,7 +872,7 @@ def main():
     log(f"스팩 {len(spacs)}종목")
     events += spacs
 
-    events = [e for e in events if keep(e)]
+    events = [e for e in events if keep(e) and any(L.get("code") and L.get("last") for L in e["legs"])]
     for i, e in enumerate(events):
         e["id"] = f"{e['type'][:2]}-{e.get('rcept_no') or (e['legs'][0]['code'] or i)}"
         e["url"] = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={e['rcept_no']}" if e.get("rcept_no") else None
