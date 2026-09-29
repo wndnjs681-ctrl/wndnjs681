@@ -1,0 +1,50 @@
+name: event-arb
+
+on:
+  schedule:
+    # 장중 점검 13:10 KST (04:10 UTC), 장 마감 후 16:50 KST (07:50 UTC) — 평일
+    - cron: "10 4 * * 1-5"
+    - cron: "50 7 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      lookback:
+        description: "공시 조회 기간(달력일)"
+        default: "150"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: event-arb
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet finance-datareader pandas numpy lxml requests
+
+      - name: Build events
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback || '150' }}
+          KEEP_DONE_DAYS: "21"
+          SPAC_TRUST_RATE: "0.025"
+        run: python event_arb.py
+
+      - name: Commit output
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/events_kr.json
+          git diff --staged --quiet || git commit -m "event-arb: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase --autostash || true
+          git push
