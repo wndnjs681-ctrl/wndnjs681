@@ -834,7 +834,8 @@ def universe_us():
     sym = _col(df, "Symbol", "Code")
     nm = _col(df, "Name")
     u = pd.DataFrame({
-        "ticker": sym.astype(str).str.strip(),
+        # BRK/B · BRK B · BRK-B 같은 클래스 주식 표기를 BRK.B 로 통일(정규식 필터에서 빠지던 문제)
+        "ticker": sym.astype(str).str.strip().str.upper().str.replace(r"[/\s\-]+", ".", regex=True),
         "name": (nm if nm is not None else sym).astype(str),
     })
     mc = _col(df, "MarketCap", "Marcap")
@@ -951,7 +952,7 @@ def yahoo_fundamentals(symbols):
               "bookValue,trailingAnnualDividendYield,dividendYield,marketCap,"
               "dividendRate,trailingAnnualDividendRate,regularMarketPrice")
     out, notes, bad = {}, [], 0
-    syms = list(symbols)
+    syms = [str(x).replace(".", "-") for x in symbols]       # 야후 표기: BRK.B → BRK-B
     for i in range(0, len(syms), 50):
         chunk = syms[i:i + 50]
         try:
@@ -967,6 +968,7 @@ def yahoo_fundamentals(symbols):
             sym = q.get("symbol")
             if not sym:
                 continue
+            sym = sym.replace("-", ".")                          # 화면 티커(BRK.B)로 되돌림
             dy = _us_div_yield(q)
             out[sym] = {
                 "per": q.get("trailingPE"),
