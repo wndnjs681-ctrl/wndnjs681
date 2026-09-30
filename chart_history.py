@@ -89,6 +89,60 @@ def fetch(market, ticker, start, tries=3):
             time.sleep(1.5 * (k + 1))
 
 
+NAVER_CAP = 2900      # 네이버 일봉은 최근 약 3000봉까지만 준다 → 이만큼 꽉 찬 종목은 더 옛날이 있을 수 있다
+
+
+def _older(market, ticker, first):
+    """first 이전 구간을 받는다. 국내: 끝날짜 지정 재요청 → 안 되면 야후(.KS/.KQ). 겹치는 날 종가 비율로 이어 붙인다."""
+    import FinanceDataReader as fdr
+    end = (first - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    cands = [ticker]
+    if market == "kr":
+        cands += [f"YAHOO:{ticker}.KS", f"YAHOO:{ticker}.KQ"]
+    for sym in cands:
+        try:
+            df = clean(fdr.DataReader(sym, START, end), market)
+        except Exception:
+            continue
+        if df is None or df.empty or df.index[0] >= first - pd.Timedelta(days=5):
+            continue
+        return df[df.index < first]
+    return None
+
+
+def fetch_full(market, ticker):
+    """2000년부터 전체. 한 번에 다 안 오면(국내 네이버 봉 수 제한) 앞 구간을 이어 받는다."""
+    df = fetch(market, ticker, START)
+    if df is None or df.empty or market != "kr":
+        return df
+    return backfill(market, ticker, df)
+
+
+def backfill(market, ticker, df):
+    for _ in range(4):
+        first = df.index[0]
+        if first <= pd.Timestamp(START) + pd.Timedelta(days=40) or len(df) < NAVER_CAP:
+            break
+        older = _older(market, ticker, first)
+        if older is None or older.empty:
+            break
+        # 수정주가 기준을 맞춘다: older 마지막 봉과 df 첫 봉 사이 가격 비율(같은 소스가 아니면 다를 수 있음)
+        try:
+            probe = fetch(market, ticker, older.index[-1].strftime("%Y-%m-%d"))
+            ov = older.index.intersection(probe.index) if probe is not None else []
+            if len(ov):
+                k = float(probe.loc[ov[-1], "Close"] / older.loc[ov[-1], "Close"])
+                if 0.01 < k < 100 and abs(k - 1) > 0.003:
+                    for c in ("Open", "High", "Low", "Close"):
+                        older[c] = older[c] * k
+        except Exception:
+            pass
+        df = pd.concat([older, df]).sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        time.sleep(0.05)
+    return df
+
+
 # ───────────────────────── 보관소 갱신 ─────────────────────────
 def load_store(path):
     if not os.path.exists(path):
@@ -153,7 +207,14 @@ def update_market(market, store, tickers, t_end):
             if diff > 0.003:
                 todo_full.append(t); stats["refetch"] += 1
                 continue
-        store[t] = pd.concat([old[old.index < new.index[0]], new])
+        merged = pd.concat([old[old.index < new.index[0]], new])
+        if market == "kr" and len(merged) >= NAVER_CAP and merged.index[0] > pd.Timestamp(START) + pd.Timedelta(days=40):
+            try:
+                n0 = len(merged); merged = backfill(market, t, merged)
+                if len(merged) > n0: stats["backfill"] = stats.get("backfill", 0) + 1
+            except Exception:
+                pass
+        store[t] = merged
         stats["inc"] += 1
         time.sleep(0.03)
 
@@ -163,7 +224,7 @@ def update_market(market, store, tickers, t_end):
             stats["skipped"] += 1
             continue
         try:
-            df = fetch(market, t, START)
+            df = fetch_full(market, t)
         except Exception as e:
             stats["fail"] += 1; fails.append(f"{t}:{type(e).__name__}")
             continue
