@@ -33,6 +33,7 @@ MIN_VAL_KR = float(os.getenv("MIN_VALUE_EOK", "3"))      # 국내 최소 거래�
 MIN_CAP_US = float(os.getenv("MIN_CAP_MUSD", "1000"))    # 미국 최소 시총(백만달러)
 MAX_KR     = int(os.getenv("MAX_KR", "2600"))
 MAX_US     = int(os.getenv("MAX_US", "1200"))
+MIN_BARS   = int(os.getenv("MIN_BARS", "30"))               # 지표 계산 최소 봉 수(신규상장 포함)
 WORKERS    = int(os.getenv("WORKERS", "10"))
 LOOKBACK_D = int(os.getenv("LOOKBACK_DAYS", "560"))      # 달력일 (약 2년 반)
 BB_LEN     = int(os.getenv("BB_LEN", "150"))             # 볼린저 기간
@@ -98,10 +99,11 @@ def bull_streak(close, open_):
 
 def compute_metrics(df):
     """df: 날짜 오름차순, 컬럼 Open/High/Low/Close/Volume → dict (실패 시 None)"""
-    if df is None or len(df) < 130:
+    # 최소 30봉 — 상장 몇 달 안 된 대형 신규상장(예: SPCX)도 넣는다. 긴 창 지표는 있는 봉만큼만 쓰거나 비워 둔다.
+    if df is None or len(df) < MIN_BARS:
         return None
     df = df.dropna(subset=["Close"])
-    if len(df) < 130:
+    if len(df) < MIN_BARS:
         return None
 
     close, open_ = df["Close"].astype(float), df["Open"].astype(float)
@@ -279,6 +281,13 @@ NEED = ["Open", "High", "Low", "Close", "Volume"]
 
 
 def fetch_ohlcv(code, tries=3):
+    d = _fetch_ohlcv(code, tries)
+    if d is None and ("." in code or "/" in code):          # BRK.B → BRK-B (야후 표기)
+        d = _fetch_ohlcv(code.replace(".", "-").replace("/", "-"), tries)
+    return d
+
+
+def _fetch_ohlcv(code, tries=3):
     for a in range(tries):
         try:
             d = fdr.DataReader(code, START, END)
@@ -832,6 +841,13 @@ def universe_us():
     u["mcap"] = pd.to_numeric(mc, errors="coerce") / 1e6 if mc is not None else np.nan
     ind = _col(df, "Sector", "Industry")   # 큰 분류를 우선
     u["sector"] = ind.map(_safe_str) if ind is not None else ""
+    try:                                   # S&P500 밖 종목은 나스닥 API 업종으로 채운다
+        smap = us_sector_map()
+        blank = u["sector"].isin(["", "nan", "None"])
+        u.loc[blank, "sector"] = u.loc[blank, "ticker"].map(lambda t: smap.get(t, ""))
+        notes.append(f"나스닥업종={len(smap)}종목·보강 {int(blank.sum() - u['sector'].isin(['', 'nan', 'None']).sum())}건")
+    except Exception as e:
+        notes.append(f"나스닥업종=예외:{type(e).__name__}:{str(e)[:40]}")
     DIAG["us_sector"] = DIAG.get("us_listing", []) + [
         ("업종컬럼=" + str(ind.name)) if ind is not None else "업종컬럼없음",
         "가용컬럼=" + ",".join(map(str, list(df.columns)[:14])),
@@ -842,6 +858,58 @@ def universe_us():
         u = u[u["mcap"].fillna(0) >= MIN_CAP_US]
         u = u.sort_values("mcap", ascending=False)
     return u.drop_duplicates("ticker").head(MAX_US).reset_index(drop=True)
+
+
+def _us_div_yield(q):
+    """배당수익률(%) — Yahoo 의 dividendYield 는 응답에 따라 % 로도, 비율로도 온다
+    (0.42 가 0.42% 인지 42% 인지 구분 불가). 그래서 배당금 ÷ 주가로 직접 계산하고,
+    배당금이 없을 때만 비율로 확정된 trailingAnnualDividendYield 를 쓴다."""
+    def f(k):
+        try:
+            v = float(q.get(k))
+            return v if np.isfinite(v) else None
+        except (TypeError, ValueError):
+            return None
+    px = f("regularMarketPrice")
+    for k in ("dividendRate", "trailingAnnualDividendRate"):
+        rate = f(k)
+        if rate is not None and px and px > 0:
+            y = rate / px * 100
+            return y if 0 <= y <= 25 else None
+    t = f("trailingAnnualDividendYield")          # 항상 비율(0.0197 = 1.97%)
+    if t is not None:
+        y = t * 100
+        return y if 0 <= y <= 25 else None
+    return None
+
+
+NASDAQ_SECTOR = {"Technology": "Information Technology", "Finance": "Financials",
+                 "Basic Materials": "Materials", "Telecommunications": "Communication Services"}
+
+
+def us_sector_map():
+    """나스닥 스크리너 API 로 미국 전 종목 업종을 한 번에 받는다.
+    FinanceDataReader 의 NASDAQ·NYSE 리스팅에는 Sector 가 없어 S&P500 밖 종목이 '미분류' 로 남던 문제 보완.
+    업종명은 S&P500(GICS) 표기에 맞춘다."""
+    import requests
+    r = requests.get("https://api.nasdaq.com/api/screener/stocks",
+                     params={"tableonly": "true", "limit": "25000", "download": "true"},
+                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                            "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+                              "Accept": "application/json, text/plain, */*",
+                              "Origin": "https://www.nasdaq.com", "Referer": "https://www.nasdaq.com/"},
+                     timeout=40)
+    rows = ((r.json() or {}).get("data") or {}).get("rows") or []
+    m = {}
+    for x in rows:
+        sym = _safe_str(x.get("symbol")).upper()
+        sec = _safe_str(x.get("sector"))
+        if not sym or not sec:
+            continue
+        sec = NASDAQ_SECTOR.get(sec, sec)
+        for k in {sym, sym.replace("/", "."), sym.replace("/", "-"), sym.replace("^", "-")}:
+            m.setdefault(k, sec)
+    return m
 
 
 def yahoo_fundamentals(symbols):
@@ -861,7 +929,8 @@ def yahoo_fundamentals(symbols):
         return {}, [f"crumb 이상:{crumb[:30]!r}"]
 
     FIELDS = ("trailingPE,forwardPE,priceToBook,epsTrailingTwelveMonths,epsForward,"
-              "bookValue,trailingAnnualDividendYield,dividendYield,marketCap")
+              "bookValue,trailingAnnualDividendYield,dividendYield,marketCap,"
+              "dividendRate,trailingAnnualDividendRate,regularMarketPrice")
     out, notes, bad = {}, [], 0
     syms = list(symbols)
     for i in range(0, len(syms), 50):
@@ -879,9 +948,7 @@ def yahoo_fundamentals(symbols):
             sym = q.get("symbol")
             if not sym:
                 continue
-            dy = q.get("dividendYield")
-            if dy is not None and dy < 1:      # 비율로 오는 경우가 있어 % 로 맞춘다
-                dy *= 100
+            dy = _us_div_yield(q)
             out[sym] = {
                 "per": q.get("trailingPE"),
                 "fwd_per": q.get("forwardPE"),
@@ -889,7 +956,7 @@ def yahoo_fundamentals(symbols):
                 "eps": q.get("epsTrailingTwelveMonths"),
                 "fwd_eps": q.get("epsForward"),
                 "bps": q.get("bookValue"),
-                "dvd": dy if dy is not None else q.get("trailingAnnualDividendYield"),
+                "dvd": dy,
                 "mcap": (q.get("marketCap") / 1e6) if q.get("marketCap") else None,
             }
         time.sleep(0.25)
@@ -982,13 +1049,15 @@ def attach_valuation(market, rows):
             pbr = px / bps
         if pick(f, "dvd") is None and pick(f, "dps") and px:
             f = dict(f, dvd=pick(f, "dps") / px * 100)
-        r["per"] = _r(per) if per and per > 0 else None       # 적자(음수 PER)는 의미가 없어 비움
-        r["pbr"] = _r(pbr) if pbr and pbr > 0 else None
+        # 적자(음수 PER)와 이익이 0 에 가까워 튀는 값(PER 500↑, PBR 100↑)은 비교에 쓸 수 없어 비움
+        r["per"] = _r(per) if per and 0 < per <= 500 else None
+        r["pbr"] = _r(pbr) if pbr and 0 < pbr <= 100 else None
         r["eps"] = _r(eps, 0)
         r["bps"] = _r(bps, 0)
         r["dvd_yld"] = _r(pick(f, "dvd"))
         # ROE = EPS / BPS — KRX·Yahoo 둘 다 같은 정의로 계산된다
-        r["roe"] = _r(eps / bps * 100) if eps is not None and bps and bps > 0 else None
+        roe = eps / bps * 100 if eps is not None and bps and bps > 0 else None
+        r["roe"] = _r(roe) if roe is not None and abs(roe) <= 150 else None   # 자본잠식 직전 등 극단값 제외
         if market == "us" and pick(f, "mcap") and not r.get("mcap"):
             r["mcap"] = _r(pick(f, "mcap"), 0)
 
@@ -1004,8 +1073,8 @@ def attach_valuation(market, rows):
         r["fwd_per"] = _r(fp) if fp and fp > 0 else None
         r["fwd_eps"] = _r(fe, 0)
         # 이익 개선폭: 선행 EPS 가 후행 EPS 대비 얼마나 늘어나는가
-        r["eps_growth"] = (_r((fe / eps - 1) * 100)
-                           if fe is not None and eps and eps > 0 else None)
+        g = (fe / eps - 1) * 100 if fe is not None and eps and eps > 0 else None
+        r["eps_growth"] = _r(g) if g is not None and -100 <= g <= 500 else None   # 기저효과로 튀는 값 제외
 
         # 52주 PER 밴드 내 위치
         hs = hist.get(r["ticker"]) or []
@@ -1060,13 +1129,13 @@ def build_series(market, data, rows):
 
     out = {}
     for t, d in data.items():
-        if t not in keep or len(d) < 60:
+        if t not in keep or len(d) < MIN_BARS:
             continue
         w = d.iloc[-SERIES_DAYS:]
         c = w["Close"].astype(float)
         ok = np.isfinite(c)
         w, c = w[ok], c[ok]
-        if len(c) < 60:
+        if len(c) < MIN_BARS:
             continue
         v = w["Volume"].astype(float).fillna(0)
         o = w["Open"].astype(float)
