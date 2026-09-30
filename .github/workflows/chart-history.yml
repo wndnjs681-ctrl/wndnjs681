@@ -1,0 +1,67 @@
+name: chart-history
+
+# 2000년~ 일봉 보관소(Release 'chart-history' 의 parquet) 갱신 + 차트 팩(브랜치 'chart') 생성
+on:
+  schedule:
+    # 국내: 평일 18:30 KST (screener-full 16:40 이후)
+    - cron: "30 9 * * 1-5"
+    # 미국: 화~토 08:10 KST (미국 장 마감 + screener-full 07:40 이후)
+    - cron: "10 23 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "갱신할 시장 (kr, us, all, none=팩만 재생성). 처음 한 번은 all 로 실행"
+        default: "all"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chart-history
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MARKET: ${{ github.event.inputs.market || (github.event.schedule == '10 23 * * 1-5' && 'us' || 'kr') }}
+    steps:
+      - uses: actions/checkout@v4          # main — output/universe_*.json 을 읽는다
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet finance-datareader pandas numpy pyarrow requests lxml beautifulsoup4
+
+      - name: 보관소 받기 (첫 실행이면 비어 있음)
+        run: |
+          mkdir -p hist packs
+          gh release view chart-history >/dev/null 2>&1 || \
+            gh release create chart-history --title "chart-history (장기 일봉 보관소)" \
+              --notes "chart_history.py 가 관리합니다. 수동으로 지우지 마세요." --latest=false
+          gh release download chart-history -p 'hist_*.parquet' -D hist --clobber || echo "보관 파일 없음 — 2000년부터 새로 받습니다"
+          ls -la hist
+
+      - name: 갱신 + 팩 생성
+        env:
+          TIME_BUDGET_MIN: "230"
+          DAILY_YEARS: "3"
+          PACK_BUDGET_MB: "44"
+        run: python chart_history.py --hist hist --out packs --market "$MARKET"
+
+      - name: 보관소 올리기
+        run: gh release upload chart-history hist/hist_*.parquet --clobber
+
+      - name: 차트 팩 브랜치 갱신 (커밋 하나만 유지)
+        run: |
+          cd packs
+          git init -q -b chart
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "chart packs $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" chart
