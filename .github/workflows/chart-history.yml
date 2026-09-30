@@ -50,7 +50,7 @@ jobs:
         env:
           TIME_BUDGET_MIN: "230"
           DAILY_YEARS: "3"
-          PACK_BUDGET_MB: "44"
+          PACK_BUDGET_MB: "36"
         run: python chart_history.py --hist hist --out packs --market "$MARKET"
 
       - name: 보관소 올리기
