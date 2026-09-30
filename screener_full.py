@@ -854,6 +854,12 @@ def universe_us():
     ]
     u["value"] = np.nan
     u = u[u["ticker"].str.fullmatch(r"[A-Z.\-]{1,6}", na=False)]
+    # 리스팅에 시총이 없으면(FDR NASDAQ/NYSE) 나스닥 스크리너 시총으로 채운다 — 없으면 head(MAX_US) 가
+    # 리스팅 순서(S&P500→NASDAQ→NYSE)대로 잘라 TSM·BRK.B 같은 NYSE 대형주가 빠진다.
+    if US_MCAP:
+        miss = u["mcap"].isna()
+        u.loc[miss, "mcap"] = u.loc[miss, "ticker"].map(US_MCAP)
+        notes.append(f"나스닥시총={int(u['mcap'].notna().sum())}/{len(u)}")
     if u["mcap"].notna().any():
         u = u[u["mcap"].fillna(0) >= MIN_CAP_US]
         u = u.sort_values("mcap", ascending=False)
@@ -903,13 +909,26 @@ def us_sector_map():
     m = {}
     for x in rows:
         sym = _safe_str(x.get("symbol")).upper()
+        if not sym:
+            continue
+        keys = {sym, sym.replace("/", "."), sym.replace("/", "-"), sym.replace("^", "-")}
+        try:                                             # 시총(달러) — 유니버스 순위용
+            mc = float(str(x.get("marketCap") or "").replace(",", "").replace("$", "") or "nan")
+        except ValueError:
+            mc = float("nan")
+        if np.isfinite(mc) and mc > 0:
+            for k in keys:
+                US_MCAP.setdefault(k, mc / 1e6)
         sec = _safe_str(x.get("sector"))
-        if not sym or not sec:
+        if not sec:
             continue
         sec = NASDAQ_SECTOR.get(sec, sec)
-        for k in {sym, sym.replace("/", "."), sym.replace("/", "-"), sym.replace("^", "-")}:
+        for k in keys:
             m.setdefault(k, sec)
     return m
+
+
+US_MCAP = {}   # us_sector_map 이 채운다: 티커 → 시총(백만달러)
 
 
 def yahoo_fundamentals(symbols):
