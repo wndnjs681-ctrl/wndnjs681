@@ -66,8 +66,7 @@ def load_prev(mk):
 
 def stale(rec):
     if not rec or not rec.get("s"):
-        # 실패 기록은 7일 뒤 재시도
-        return not rec or (rec.get("fail_at") or "0000") < (datetime.now(KST) - timedelta(days=7)).strftime("%Y-%m-%d")
+        return True            # 개요가 없는 종목은 매번 다시 시도(사이트가 다 막히면 40종목 만에 중단되므로 비용이 작다)
     return (rec.get("at") or "0000") < (datetime.now(KST) - timedelta(days=REFRESH_DAYS)).strftime("%Y-%m-%d")
 
 
