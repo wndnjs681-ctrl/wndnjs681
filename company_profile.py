@@ -47,8 +47,13 @@ def universe(mk):
         d = json.load(open(p, encoding="utf-8"))
         return [(str(r["ticker"]), r.get("name", "")) for r in d.get("rows", []) if r.get("ticker")]
     except Exception as e:
-        print(f"[{mk}] 유니버스 없음: {e}")
-        return []
+        try:                                                # 집 PC 등 저장소 밖에서 돌릴 때
+            u = f"https://raw.githubusercontent.com/wndnjs681-ctrl/wndnjs681/main/output/universe_{mk}.json"
+            d = requests.get(u, timeout=60).json()
+            return [(str(r["ticker"]), r.get("name", "")) for r in d.get("rows", []) if r.get("ticker")]
+        except Exception as e2:
+            print(f"[{mk}] 유니버스 없음: {e} / {e2}")
+            return []
 
 
 def load_prev(mk):
@@ -102,10 +107,39 @@ def kr_naver(sess, code):
     return {"s": clip(s), "src": "네이버 금융(FnGuide 제공)"}
 
 
+def kr_wise(sess, code):
+    """네이버 증권 '기업개요' 탭의 원본(WiseReport) — 금융 사이트 본진보다 막히는 일이 적다."""
+    from bs4 import BeautifulSoup
+    r = sess.get("https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx",
+                 params={"cmp_cd": code}, timeout=20, headers={"Referer": "https://finance.naver.com/"})
+    r.encoding = "utf-8"
+    soup = BeautifulSoup(r.text, "lxml")
+    box = soup.select_one(".cmp_comment") or soup.select_one("#cTB11 + .cmp_comment")
+    lines = [li.get_text(" ", strip=True) for li in box.select("li")] if box else []
+    s = " ".join(x for x in lines if x)
+    if not s:
+        return None
+    ind = ""
+    for td in soup.select("td.cmp-table-cell dt.line-left"):
+        t = td.get_text(" ", strip=True)
+        if t.startswith("WICS"):
+            ind = t.split(":", 1)[-1].strip(); break
+    return {"s": clip(s), "ind": ind[:60], "src": "WiseReport(네이버 증권)"}
+
+
+ERR = {}
+
+
+def _note(k, e):
+    m = f"{type(e).__name__}:{str(e)[:60]}"
+    ERR.setdefault(k, {})
+    ERR[k][m] = ERR[k].get(m, 0) + 1
+
+
 def run_kr(tickers, prev):
     sess = requests.Session()
     sess.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9"})
-    out, st = dict(prev), dict(new=0, fail=0, keep=0, skipped=0, fn=0, nv=0)
+    out, st = dict(prev), dict(new=0, fail=0, keep=0, skipped=0, wr=0, fn=0, nv=0)
     todo = [t for t, _ in tickers if stale(prev.get(t))]
     st["keep"] = len(tickers) - len(todo)
     for i, t in enumerate(todo):
@@ -113,10 +147,13 @@ def run_kr(tickers, prev):
             st["skipped"] += 1
             continue
         rec = None
-        for f, k in ((kr_fnguide, "fn"), (kr_naver, "nv")):
+        for f, k in ((kr_wise, "wr"), (kr_fnguide, "fn"), (kr_naver, "nv")):
             try:
                 rec = f(sess, t)
-            except Exception:
+                if not rec:
+                    _note(k, ValueError("본문 없음"))
+            except Exception as e:
+                _note(k, e)
                 rec = None
             if rec:
                 st[k] += 1
@@ -128,6 +165,9 @@ def run_kr(tickers, prev):
         else:
             out[t] = {**(prev.get(t) or {}), "fail_at": TODAY}
             st["fail"] += 1
+            if st["new"] == 0 and st["fail"] >= 40:          # 처음부터 40개 연속 실패 = 사이트 차단 → 그만
+                st["abort"] = "처음 40종목 연속 실패 — 원인은 err 참고"
+                break
         time.sleep(0.15)
         if i and i % 200 == 0:
             print(f"  [kr] {i}/{len(todo)} …")
@@ -204,6 +244,7 @@ def main():
         keep = {t for t, _ in tk}
         out = {t: v for t, v in out.items() if t in keep}        # 유니버스에서 빠진 종목은 정리
         n_ok = sum(1 for v in out.values() if v.get("s"))
+        st["err"] = ERR.copy(); ERR.clear()
         payload = {"asof": TODAY, "n": n_ok, "diag": st, "p": out}
         p = os.path.join(OUT_DIR, f"profile_{mk}.json")
         with open(p, "w", encoding="utf-8") as f:
