@@ -1,0 +1,43 @@
+name: company-profile
+
+# 기업개요(국내 FnGuide/네이버, 미국 Yahoo) — 증분 수집. 처음 한 번은 수동 실행.
+on:
+  schedule:
+    - cron: "15 21 * * 6"     # 매주 일요일 06:15 KST
+  workflow_dispatch:
+    inputs:
+      markets:
+        description: "kr, us, 또는 kr,us"
+        default: "kr,us"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-full          # screener-full 과 같은 그룹 — output 커밋 충돌 방지
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet requests beautifulsoup4 lxml
+      - name: Collect profiles
+        env:
+          MARKETS: ${{ github.event.inputs.markets || 'kr,us' }}
+          TIME_BUDGET_MIN: "55"
+        run: python company_profile.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/profile_*.json
+          git diff --staged --quiet || git commit -m "company-profile: $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
