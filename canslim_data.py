@@ -234,7 +234,7 @@ def us_one(sess, crumb, t):
 
 
 # ── SEC EDGAR (XBRL companyfacts): 분기·연간 EPS/매출/순이익 장기 이력. 야후 무료 데이터는 4분기·1~4년뿐이라 보강용 ──
-SEC_UA = os.getenv("SEC_UA", "personal-stock-screener research (github.com/wndnjs681-ctrl/wndnjs681)")
+SEC_UA = os.getenv("SEC_UA") or "personal-stock-screener research (github.com/wndnjs681-ctrl/wndnjs681)"
 SEC = {"map": None}
 CONCEPTS = {"eps": ["EarningsPerShareDiluted", "EarningsPerShareBasic", "EarningsPerShareBasicAndDiluted"],
             "rev": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet",
@@ -247,6 +247,8 @@ def sec_map():
         SEC["map"] = {}
         try:
             r = requests.get("https://www.sec.gov/files/company_tickers.json", headers={"User-Agent": SEC_UA}, timeout=30)
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code} — SEC_UA(이름 이메일) 확인")
             for v in r.json().values():
                 SEC["map"][str(v["ticker"]).upper().replace(".", "-")] = int(v["cik_str"])
         except Exception as e:
