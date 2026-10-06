@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+CAN SLIM 재무·수급 데이터 수집 — 스크리너 '오닐' 체크리스트용.
+
+  미국 (Yahoo)
+    C  분기 EPS·매출 (fundamentals-timeseries + earningsHistory)
+    A  연간 EPS·매출·순이익·자본(ROE 계산)·부채
+    S  발행주식 수 추이(자사주 매입), 유통주식 수, 부채
+    I  기관 보유 비율·기관 수, 상위 기관 보유 증감(institutionOwnership pctChange)
+  국내 (WiseReport = 네이버 증권 기업분석 원본 → 실패 시 FnGuide Financial Highlight)
+    C  분기 매출·영업이익·지배순이익·EPS
+    A  연간 같은 항목 + ROE·부채비율
+    S  발행주식 수 추이
+    I  기관·외국인 60거래일 순매수 금액 (pykrx = KRX, 시장 전체 한 번에)
+
+산출물: output/canslim_{kr,us}.json
+  {"asof":..., "n":..., "diag":{...}, "p":{ticker:{
+      "q":[["2025-06", eps, 매출, 순이익], ...]  (오래된→최근, 실적만, 추정치 제외)
+      "y":[["2024", eps, 매출, 순이익, 자본, 부채비율], ...]
+      "sh":[["2024-12", 주식수], ...], "fl": 유통주식수, "so": 발행주식수,
+      "roe": ROE%, "ih": 기관보유%, "ic": 기관수, "inet": [증가 기관수, 감소 기관수], "ipc": 상위기관 평균 증감%,
+      "inst60": 기관 60일 순매수(억원), "frgn60": 외국인 60일 순매수(억원),
+      "src": "...", "at": "YYYY-MM-DD"}}}
+
+재무는 분기마다 바뀌므로 REFRESH_DAYS(기본 7일) 지난 종목만 다시 받는다. 수급(inst60/frgn60)은 매번 갱신.
+"""
+import json, os, re, sys, time
+from datetime import datetime, timedelta, timezone
+
+import requests
+
+KST = timezone(timedelta(hours=9))
+NOW = datetime.now(KST)
+TODAY = NOW.strftime("%Y-%m-%d")
+OUT_DIR = os.getenv("OUT_DIR", "output")
+REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "7"))
+TIME_BUDGET = float(os.getenv("TIME_BUDGET_MIN", "50")) * 60
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
+RAW = "https://raw.githubusercontent.com/wndnjs681-ctrl/wndnjs681/main/"
+T0 = time.time()
+ERR = {}
+
+
+DEADLINE = T0 + TIME_BUDGET
+
+
+def over():
+    return time.time() > DEADLINE
+
+
+def note(k, e):
+    m = f"{type(e).__name__}:{str(e)[:70]}"
+    ERR.setdefault(k, {})
+    ERR[k][m] = ERR[k].get(m, 0) + 1
+
+
+def fnum(x):
+    try:
+        if x is None:
+            return None
+        if isinstance(x, dict):
+            x = x.get("raw")
+        if isinstance(x, str):
+            x = x.replace(",", "").strip()
+            if x in ("", "-", "N/A", "nan", "완전잠식"):
+                return None
+        v = float(x)
+        return v if v == v else None
+    except Exception:
+        return None
+
+
+def universe(mk):
+    p = os.path.join(OUT_DIR, f"universe_{mk}.json")
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+    except Exception:
+        try:
+            d = requests.get(RAW + f"output/universe_{mk}.json", timeout=60).json()
+        except Exception as e:
+            print(f"[{mk}] 유니버스 없음: {e}")
+            return []
+    return [str(r["ticker"]) for r in d.get("rows", []) if r.get("ticker")]
+
+
+def load_prev(mk):
+    try:
+        return json.load(open(os.path.join(OUT_DIR, f"canslim_{mk}.json"), encoding="utf-8")).get("p") or {}
+    except Exception:
+        return {}
+
+
+def stale(rec):
+    if not rec or not (rec.get("q") or rec.get("y")):
+        return True
+    return (rec.get("at") or "0000") < (NOW - timedelta(days=REFRESH_DAYS)).strftime("%Y-%m-%d")
+
+
+# ═════════════════════════ 미국 ═════════════════════════
+def yahoo_session():
+    s = requests.Session()
+    s.headers.update({"User-Agent": UA})
+    try:
+        s.get("https://fc.yahoo.com", timeout=15)
+    except Exception:
+        pass
+    crumb = (s.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=15).text or "").strip()
+    if not crumb or len(crumb) > 40 or "<" in crumb:
+        raise RuntimeError(f"crumb 이상: {crumb[:30]!r}")
+    return s, crumb
+
+
+TS_TYPES = ["quarterlyDilutedEPS", "quarterlyBasicEPS", "quarterlyTotalRevenue", "quarterlyNetIncomeCommonStockholders",
+            "quarterlyOrdinarySharesNumber",
+            "annualDilutedEPS", "annualBasicEPS", "annualTotalRevenue", "annualNetIncomeCommonStockholders",
+            "annualStockholdersEquity", "annualTotalDebt", "annualOrdinarySharesNumber"]
+
+
+def us_timeseries(sess, crumb, sym):
+    p2 = int(time.time())
+    p1 = p2 - 6 * 366 * 86400
+    r = sess.get(f"https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{sym}",
+                 params={"type": ",".join(TS_TYPES), "period1": p1, "period2": p2, "crumb": crumb,
+                         "merge": "false", "padTimeSeries": "true"}, timeout=25)
+    out = {}
+    for blk in ((r.json() or {}).get("timeseries") or {}).get("result") or []:
+        typ = ((blk.get("meta") or {}).get("type") or [None])[0]
+        if not typ or typ not in blk:
+            continue
+        ser = {}
+        for o in blk.get(typ) or []:
+            if not o:
+                continue
+            d = (o.get("asOfDate") or "")[:7]
+            v = fnum((o.get("reportedValue") or {}).get("raw"))
+            if d and v is not None:
+                ser[d] = v
+        out[typ] = ser
+    return out
+
+
+def us_summary(sess, crumb, sym):
+    r = sess.get(f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{sym}",
+                 params={"modules": "earningsHistory,defaultKeyStatistics,majorHoldersBreakdown,institutionOwnership,financialData",
+                         "crumb": crumb}, timeout=25)
+    res = ((r.json() or {}).get("quoteSummary") or {}).get("result") or []
+    return res[0] if res else {}
+
+
+def us_one(sess, crumb, t):
+    sym = t.replace(".", "-")
+    rec = {"src": "Yahoo"}
+    ts = {}
+    try:
+        ts = us_timeseries(sess, crumb, sym)
+    except Exception as e:
+        note("us_ts", e)
+    sm = {}
+    try:
+        sm = us_summary(sess, crumb, sym)
+    except Exception as e:
+        note("us_sum", e)
+    if not ts and not sm:
+        return None
+
+    def pick(*keys):
+        for k in keys:
+            if ts.get(k):
+                return ts[k]
+        return {}
+
+    qe, qr, qn = pick("quarterlyDilutedEPS", "quarterlyBasicEPS"), pick("quarterlyTotalRevenue"), pick("quarterlyNetIncomeCommonStockholders")
+    # earningsHistory 로 분기 EPS 보충(타임시리즈는 보통 최근 4~5분기뿐)
+    for h in ((sm.get("earningsHistory") or {}).get("history") or []):
+        d = h.get("quarter") or {}
+        if isinstance(d, dict) and d.get("fmt"):
+            k = d["fmt"][:7]
+            v = fnum(h.get("epsActual"))
+            if v is not None and k not in qe:
+                qe[k] = v
+    qk = sorted(set(qe) | set(qr))[-12:]
+    rec["q"] = [[k, qe.get(k), qr.get(k), qn.get(k)] for k in qk]
+
+    ye, yr, yn = pick("annualDilutedEPS", "annualBasicEPS"), pick("annualTotalRevenue"), pick("annualNetIncomeCommonStockholders")
+    yq, yd = pick("annualStockholdersEquity"), pick("annualTotalDebt")
+    yk = sorted(set(ye) | set(yr))[-6:]
+    rec["y"] = []
+    for k in yk:
+        eq, debt = yq.get(k), yd.get(k)
+        rec["y"].append([k[:4], ye.get(k), yr.get(k), yn.get(k), eq, round(debt / eq * 100, 1) if eq and debt is not None and eq > 0 else None])
+
+    sh = dict(pick("annualOrdinarySharesNumber"))
+    sh.update(pick("quarterlyOrdinarySharesNumber"))
+    rec["sh"] = [[k, sh[k]] for k in sorted(sh)[-8:]]
+
+    ks = sm.get("defaultKeyStatistics") or {}
+    fd = sm.get("financialData") or {}
+    mh = sm.get("majorHoldersBreakdown") or {}
+    rec["fl"] = fnum(ks.get("floatShares"))
+    rec["so"] = fnum(ks.get("sharesOutstanding"))
+    roe = fnum(fd.get("returnOnEquity"))
+    rec["roe"] = round(roe * 100, 1) if roe is not None else None
+    ih = fnum(mh.get("institutionsPercentHeld"))
+    rec["ih"] = round(ih * 100, 1) if ih is not None else None
+    rec["ic"] = fnum(mh.get("institutionsCount"))
+    own = (sm.get("institutionOwnership") or {}).get("ownershipList") or []
+    chg = [fnum(o.get("pctChange")) for o in own]
+    chg = [c for c in chg if c is not None]
+    if chg:
+        rec["inet"] = [sum(1 for c in chg if c > 0.001), sum(1 for c in chg if c < -0.001)]
+        rec["ipc"] = round(sum(chg) / len(chg) * 100, 1)
+    if not rec["q"] and not rec["y"]:
+        return None
+    return rec
+
+
+def run_us(tickers, prev):
+    out, st = dict(prev), dict(new=0, fail=0, keep=0, skipped=0)
+    todo = [t for t in tickers if stale(prev.get(t))]
+    st["keep"] = len(tickers) - len(todo)
+    try:
+        sess, crumb = yahoo_session()
+    except Exception as e:
+        st["err"] = f"{type(e).__name__}: {e}"[:150]
+        return out, st
+    for i, t in enumerate(todo):
+        if over():
+            st["skipped"] = len(todo) - i
+            break
+        rec = None
+        for k in range(2):
+            try:
+                rec = us_one(sess, crumb, t)
+                break
+            except Exception as e:
+                note("us", e)
+                time.sleep(2)
+        if rec:
+            rec["at"] = TODAY
+            out[t] = rec
+            st["new"] += 1
+        else:
+            st["fail"] += 1
+            if st["new"] == 0 and st["fail"] >= 40:
+                st["abort"] = "처음 40종목 연속 실패"
+                break
+        time.sleep(0.15)
+        if i and i % 200 == 0:
+            print(f"  [us] {i}/{len(todo)} …", flush=True)
+    return out, st
+
+
+# ═════════════════════════ 국내 ═════════════════════════
+def _period(h):
+    """'2025/06', '2025/06(E)', '2025.06' → ('2025-06', 추정여부)"""
+    m = re.search(r"(\d{4})[./](\d{2})", h or "")
+    if not m:
+        return None, False
+    return f"{m.group(1)}-{m.group(2)}", ("(E)" in h or "(P)" in h or "추정" in h)
+
+
+ROWS = {"eps": ("EPS",), "rev": ("매출액", "영업수익", "순영업수익", "보험료수익", "이자수익"),
+        "op": ("영업이익",), "ni": ("지배주주순이익", "당기순이익(지배)", "지배주주지분순이익", "당기순이익"),
+        "roe": ("ROE",), "debt": ("부채비율",), "sh": ("발행주식수",), "eq": ("지배주주지분", "자본총계")}
+
+
+def _parse_table(tbl):
+    """재무요약 표 → {항목: {기간: 값}}, 실적 기간 목록"""
+    heads = []
+    for tr in tbl.select("thead tr"):
+        ths = tr.find_all("th")
+        cand = [_period(th.get_text(" ", strip=True)) for th in ths]
+        if sum(1 for p, _ in cand if p) >= 2:
+            heads = cand
+    if not heads:
+        return None, []
+    cols = [(p, e) for p, e in heads if p]
+    data, pri = {}, {}
+    for tr in tbl.select("tbody tr"):
+        th = tr.find("th")
+        if not th:
+            continue
+        lab = re.sub(r"\s+", "", th.get_text(" ", strip=True))
+        tds = tr.find_all("td")
+        if len(tds) < len(cols):
+            continue
+        tds = tds[-len(cols):]
+        for key, names in ROWS.items():
+            hit = next((i for i, n in enumerate(names) if lab.startswith(n)), None)
+            if hit is None or (key == "ni" and names[hit] == "당기순이익" and "지배" not in lab and lab != "당기순이익"):
+                continue
+            if key in pri and pri[key] <= hit:
+                continue
+            pri[key] = hit
+            data[key] = {p: fnum(td.get_text(strip=True)) for (p, e), td in zip(cols, tds) if not e}
+    return data, [p for p, e in cols if not e]
+
+
+def kr_wise(sess, code):
+    from bs4 import BeautifulSoup
+    ref = "https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd=" + code
+    page = sess.get(ref, timeout=20, headers={"Referer": "https://finance.naver.com/"}).text
+    enc = re.search(r"encparam\s*:\s*['\"]([^'\"]+)", page)
+    cid = re.search(r"\bid\s*:\s*['\"]([^'\"]+)", page)
+    if not enc:
+        raise ValueError("encparam 없음")
+    res = {}
+    for freq in ("Q", "Y"):
+        params = {"cmp_cd": code, "fin_typ": "0", "freq_typ": freq, "encparam": enc.group(1)}
+        if cid:
+            params["id"] = cid.group(1)
+        r = sess.get("https://navercomp.wisereport.co.kr/v2/company/ajax/cF1001.aspx", params=params,
+                     timeout=20, headers={"Referer": ref, "X-Requested-With": "XMLHttpRequest"})
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "lxml")
+        best = None
+        for tbl in soup.select("table"):
+            d, ps = _parse_table(tbl)
+            if d and ps and (best is None or len(d) > len(best[0])):
+                best = (d, ps)
+        if best:
+            res[freq] = best
+        time.sleep(0.1)
+    return res
+
+
+def kr_fnguide(sess, code):
+    from bs4 import BeautifulSoup
+    r = sess.get("https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp",
+                 params={"pGB": "1", "gicode": "A" + code, "cID": "", "MenuYn": "Y", "ReportGB": "", "NewMenuID": "101", "stkGb": "701"},
+                 timeout=20)
+    r.encoding = "utf-8"
+    soup = BeautifulSoup(r.text, "lxml")
+    res = {}
+    for freq, sel in (("Q", "#highlight_D_Q table"), ("Y", "#highlight_D_Y table")):
+        tbl = soup.select_one(sel)
+        if tbl:
+            d, ps = _parse_table(tbl)
+            if d and ps:
+                res[freq] = (d, ps)
+    return res
+
+
+def kr_rec(res):
+    rec = {}
+    if "Q" in res:
+        d, ps = res["Q"]
+        rec["q"] = [[p, d.get("eps", {}).get(p), d.get("rev", {}).get(p), d.get("ni", {}).get(p), d.get("op", {}).get(p)] for p in ps]
+    if "Y" in res:
+        d, ps = res["Y"]
+        rec["y"] = [[p[:4], d.get("eps", {}).get(p), d.get("rev", {}).get(p), d.get("ni", {}).get(p),
+                     d.get("eq", {}).get(p), d.get("debt", {}).get(p), d.get("roe", {}).get(p)] for p in ps]
+        rec["sh"] = [[p, d.get("sh", {}).get(p)] for p in ps if d.get("sh", {}).get(p)]
+        roes = [x for x in (d.get("roe") or {}).values() if x is not None]
+        if roes:
+            rec["roe"] = list(d["roe"].values())[-1] if list(d["roe"].values())[-1] is not None else roes[-1]
+    # 분기 표에도 주식 수가 있으면 최신 값으로 보강
+    if "Q" in res:
+        d, ps = res["Q"]
+        for p in ps:
+            v = d.get("sh", {}).get(p)
+            if v:
+                rec.setdefault("sh", [])
+                if p not in [x[0] for x in rec["sh"]]:
+                    rec["sh"].append([p, v])
+        if rec.get("sh"):
+            rec["sh"].sort()
+    return rec if (rec.get("q") or rec.get("y")) else None
+
+
+def kr_flows():
+    """기관·외국인 최근 60거래일 순매수 금액(억원) — pykrx(KRX) 로 시장 전체를 한 번에."""
+    out, info = {}, {}
+    try:
+        from pykrx import stock
+    except Exception as e:
+        info["err"] = f"pykrx 없음: {e}"
+        return out, info
+    try:
+        end = stock.get_nearest_business_day_in_a_week(NOW.strftime("%Y%m%d"))
+        days = stock.get_previous_business_days(fromdate=(NOW - timedelta(days=120)).strftime("%Y%m%d"), todate=end)
+        start = days[-60].strftime("%Y%m%d") if len(days) >= 60 else days[0].strftime("%Y%m%d")
+        info["range"] = f"{start}~{end}"
+        for who, key in (("기관합계", "inst60"), ("외국인", "frgn60")):
+            for mkt in ("KOSPI", "KOSDAQ"):
+                try:
+                    df = stock.get_market_net_purchases_of_equities(start, end, mkt, who)
+                    col = [c for c in df.columns if "순매수거래대금" in c]
+                    if not col:
+                        continue
+                    for t, v in df[col[0]].items():
+                        out.setdefault(str(t).zfill(6), {})[key] = round(float(v) / 1e8, 1)
+                except Exception as e:
+                    note("krx", e)
+                time.sleep(0.5)
+        info["n"] = len(out)
+    except Exception as e:
+        info["err"] = f"{type(e).__name__}: {e}"[:150]
+    return out, info
+
+
+def run_kr(tickers, prev):
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9"})
+    out, st = dict(prev), dict(new=0, fail=0, keep=0, skipped=0, wr=0, fn=0)
+    todo = [t for t in tickers if stale(prev.get(t))]
+    st["keep"] = len(tickers) - len(todo)
+    for i, t in enumerate(todo):
+        if over():
+            st["skipped"] = len(todo) - i
+            break
+        rec = None
+        for f, k in ((kr_wise, "wr"), (kr_fnguide, "fn")):
+            try:
+                rec = kr_rec(f(sess, t))
+                if not rec:
+                    note(k, ValueError("표 없음"))
+            except Exception as e:
+                note(k, e)
+                rec = None
+            if rec:
+                rec["src"] = "WiseReport" if k == "wr" else "FnGuide"
+                st[k] += 1
+                break
+        if rec:
+            rec["at"] = TODAY
+            out[t] = rec
+            st["new"] += 1
+        else:
+            st["fail"] += 1
+            if st["new"] == 0 and st["fail"] >= 40:
+                st["abort"] = "처음 40종목 연속 실패"
+                break
+        time.sleep(0.12)
+        if i and i % 200 == 0:
+            print(f"  [kr] {i}/{len(todo)} … 성공 {st['new']}", flush=True)
+    flows, finfo = kr_flows()
+    st["flows"] = finfo
+    for t, f in flows.items():
+        if t in out:
+            out[t].update(f)
+        elif t in tickers:
+            out[t] = dict(f)
+    return out, st
+
+
+def main():
+    mks = [m.strip() for m in os.getenv("MARKETS", "us,kr").split(",") if m.strip()]
+    os.makedirs(OUT_DIR, exist_ok=True)
+    share = TIME_BUDGET / max(1, len(mks))
+    global DEADLINE
+    for j, mk in enumerate(mks):
+        DEADLINE = T0 + share * (j + 1) - (60 if mk == "kr" else 0)   # 시장별 시간 몫 (국내는 수급 수집용 1분 남김)
+        tk = universe(mk)
+        if not tk:
+            continue
+        prev = load_prev(mk)
+        out, st = (run_kr if mk == "kr" else run_us)(tk, prev)
+        keep = set(tk)
+        out = {t: v for t, v in out.items() if t in keep}
+        n_ok = sum(1 for v in out.values() if v.get("q") or v.get("y"))
+        st["err"] = ERR.copy(); ERR.clear()
+        p = os.path.join(OUT_DIR, f"canslim_{mk}.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"asof": TODAY, "n": n_ok, "diag": st, "p": out}, f, ensure_ascii=False, separators=(",", ":"))
+        print(f"[{mk}] 재무 {n_ok}/{len(tk)}종목 · {json.dumps(st, ensure_ascii=False)[:600]} · {os.path.getsize(p):,} bytes", flush=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
