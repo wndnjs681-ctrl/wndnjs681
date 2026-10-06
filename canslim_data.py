@@ -95,6 +95,8 @@ def load_prev(mk):
 def stale(rec):
     if not rec or not (rec.get("q") or rec.get("y")):
         return True
+    if len(rec.get("q") or []) < 5 or rec.get("src") == "Yahoo":   # 전년 동기 비교가 안 되는 기록은 다시 받는다
+        return True
     return (rec.get("at") or "0000") < (NOW - timedelta(days=REFRESH_DAYS)).strftime("%Y-%m-%d")
 
 
@@ -211,9 +213,109 @@ def us_one(sess, crumb, t):
     if chg:
         rec["inet"] = [sum(1 for c in chg if c > 0.001), sum(1 for c in chg if c < -0.001)]
         rec["ipc"] = round(sum(chg) / len(chg) * 100, 1)
+    de = fnum(fd.get("debtToEquity"))
+    if de is not None:
+        rec["de"] = round(de, 1)
+    try:
+        sc = sec_one(t)
+        if sc:
+            if len([q for q in sc["q"] if q[1] is not None or q[3] is not None]) >= len(rec["q"]):
+                rec["q"] = sc["q"]
+            if len(sc["y"]) >= len(rec["y"]):
+                rec["y"] = sc["y"]
+            rec["src"] = "SEC+Yahoo"
+            ERR.setdefault("sec_ok", {}); ERR["sec_ok"]["n"] = ERR["sec_ok"].get("n", 0) + 1
+    except Exception as e:
+        note("sec", e)
+    time.sleep(0.1)
     if not rec["q"] and not rec["y"]:
         return None
     return rec
+
+
+# ── SEC EDGAR (XBRL companyfacts): 분기·연간 EPS/매출/순이익 장기 이력. 야후 무료 데이터는 4분기·1~4년뿐이라 보강용 ──
+SEC_UA = os.getenv("SEC_UA", "personal-stock-screener research (github.com/wndnjs681-ctrl/wndnjs681)")
+SEC = {"map": None}
+CONCEPTS = {"eps": ["EarningsPerShareDiluted", "EarningsPerShareBasic", "EarningsPerShareBasicAndDiluted"],
+            "rev": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet",
+                    "RevenueFromContractWithCustomerIncludingAssessedTax", "RevenuesNetOfInterestExpense"],
+            "ni": ["NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "ProfitLoss"]}
+
+
+def sec_map():
+    if SEC["map"] is None:
+        SEC["map"] = {}
+        try:
+            r = requests.get("https://www.sec.gov/files/company_tickers.json", headers={"User-Agent": SEC_UA}, timeout=30)
+            for v in r.json().values():
+                SEC["map"][str(v["ticker"]).upper().replace(".", "-")] = int(v["cik_str"])
+        except Exception as e:
+            note("sec_map", e)
+    return SEC["map"]
+
+
+def _days(a, b):
+    return (datetime.strptime(b, "%Y-%m-%d") - datetime.strptime(a, "%Y-%m-%d")).days
+
+
+def _series(facts, names, unit_pred):
+    """개념 목록 → {(start,end): val} 분기·연간. 같은 기간은 늦게 제출된 값, 여러 개념은 앞 순위 우선."""
+    q, y = {}, {}
+    for name in names:
+        units = ((facts.get(name) or {}).get("units") or {})
+        for u, arr in units.items():
+            if not unit_pred(u):
+                continue
+            best = {}
+            for o in arr:
+                st, en, v = o.get("start"), o.get("end"), o.get("val")
+                if not st or not en or v is None:
+                    continue
+                k = (st, en)
+                if k not in best or (o.get("filed") or "") > (best[k][1] or ""):
+                    best[k] = (v, o.get("filed"))
+            for (st, en), (v, _) in best.items():
+                d = _days(st, en)
+                if 80 <= d <= 100:
+                    q.setdefault((st, en), v)
+                elif 350 <= d <= 380:
+                    y.setdefault((st, en), v)
+    # 4분기는 따로 공시되지 않는 경우가 많아 연간 − (1~3분기) 로 만든다
+    for (ys, ye), yv in y.items():
+        inside = sorted((k for k in q if k[0] >= ys and k[1] <= ye), key=lambda k: k[1])
+        if any(k[1] == ye for k in inside) or len(inside) != 3:
+            continue
+        q4s = inside[-1][1]
+        q[(q4s, ye)] = yv - sum(q[k] for k in inside)
+    return q, y
+
+
+def sec_one(t):
+    cik = sec_map().get(t.upper().replace(".", "-"))
+    if not cik:
+        return None
+    r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
+                     headers={"User-Agent": SEC_UA, "Accept-Encoding": "gzip, deflate"}, timeout=40)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    facts = (r.json().get("facts") or {}).get("us-gaap") or {}
+    if not facts:
+        return None
+    S = {k: _series(facts, v, (lambda u: "/shares" in u) if k == "eps" else (lambda u: u == "USD"))
+         for k, v in CONCEPTS.items()}
+    qd = {}
+    for k, (q, _) in S.items():
+        for (st, en), v in q.items():
+            qd.setdefault(en[:7], {})[k] = v
+    yd = {}
+    for k, (_, y) in S.items():
+        for (st, en), v in y.items():
+            yd.setdefault(en[:7], {})[k] = v
+    qk = sorted(qd)[-12:]
+    yk = sorted(yd)[-6:]
+    rd = lambda v, n: round(v, n) if isinstance(v, (int, float)) else None
+    return {"q": [[k, rd(qd[k].get("eps"), 3), qd[k].get("rev"), qd[k].get("ni")] for k in qk],
+            "y": [[k[:4], rd(yd[k].get("eps"), 3), yd[k].get("rev"), yd[k].get("ni"), None, None] for k in yk]}
 
 
 def run_us(tickers, prev):
@@ -401,14 +503,69 @@ def kr_flows():
     return out, info
 
 
+def _int(x):
+    v = fnum(x)
+    return v if v is not None else 0.0
+
+
+def kr_flow_one(sess, code):
+    """네이버 증권 — 최근 60거래일 기관·외국인 순매수(수량×종가, 억원). 모바일 API → 데스크톱 표 순으로 시도."""
+    try:
+        r = sess.get(f"https://m.stock.naver.com/api/stock/{code}/trend", params={"pageSize": 60}, timeout=15,
+                     headers={"Referer": "https://m.stock.naver.com/"})
+        arr = r.json()
+        if isinstance(arr, dict):
+            arr = arr.get("result") or arr.get("trends") or []
+        if arr:
+            k0 = arr[0].keys()
+            ko = next((k for k in k0 if "organ" in k.lower() and "pure" in k.lower()), None)
+            kf = next((k for k in k0 if "foreign" in k.lower() and "pure" in k.lower()), None)
+            kc = next((k for k in k0 if "close" in k.lower()), None)
+            if ko and kf and kc:
+                inst = sum(_int(a.get(ko)) * _int(a.get(kc)) for a in arr[:60]) / 1e8
+                frgn = sum(_int(a.get(kf)) * _int(a.get(kc)) for a in arr[:60]) / 1e8
+                return {"inst60": round(inst, 1), "frgn60": round(frgn, 1)}, "m"
+            note("flow_m", ValueError("키 없음 " + ",".join(list(k0)[:8])))
+    except Exception as e:
+        note("flow_m", e)
+    from bs4 import BeautifulSoup
+    inst = frgn = 0.0
+    rows = 0
+    for page in (1, 2, 3):
+        r = sess.get("https://finance.naver.com/item/frgn.naver", params={"code": code, "page": page}, timeout=15,
+                     headers={"Referer": "https://finance.naver.com/"})
+        r.encoding = "euc-kr"
+        soup = BeautifulSoup(r.text, "lxml")
+        tbls = soup.select("table.type2")
+        if len(tbls) < 2:
+            break
+        for tr in tbls[1].select("tr"):
+            td = [x.get_text(strip=True) for x in tr.find_all("td")]
+            if len(td) < 7 or not re.match(r"\d{4}\.\d{2}\.\d{2}", td[0]):
+                continue
+            px = _int(td[1])
+            inst += _int(td[5]) * px
+            frgn += _int(td[6]) * px
+            rows += 1
+            if rows >= 60:
+                break
+        if rows >= 60:
+            break
+        time.sleep(0.05)
+    if not rows:
+        raise ValueError("수급 표 없음")
+    return {"inst60": round(inst / 1e8, 1), "frgn60": round(frgn / 1e8, 1)}, "d"
+
+
 def run_kr(tickers, prev):
     sess = requests.Session()
     sess.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9"})
     out, st = dict(prev), dict(new=0, fail=0, keep=0, skipped=0, wr=0, fn=0)
     todo = [t for t in tickers if stale(prev.get(t))]
     st["keep"] = len(tickers) - len(todo)
+    flow_reserve = 9 * 60                                    # 수급 수집용 시간을 남겨 둔다
     for i, t in enumerate(todo):
-        if over():
+        if time.time() > DEADLINE - flow_reserve:
             st["skipped"] = len(todo) - i
             break
         rec = None
@@ -437,6 +594,24 @@ def run_kr(tickers, prev):
         if i and i % 200 == 0:
             print(f"  [kr] {i}/{len(todo)} … 성공 {st['new']}", flush=True)
     flows, finfo = kr_flows()
+    if len(flows) < len(tickers) // 2:                      # KRX(pykrx) 가 막히면 네이버에서 종목별로
+        fs = dict(m=0, d=0, fail=0)
+        for t in tickers:
+            if over():
+                fs["skipped"] = fs.get("skipped", 0) + 1
+                continue
+            try:
+                f, how = kr_flow_one(sess, t)
+                flows[t] = f
+                fs[how] += 1
+            except Exception as e:
+                note("flow", e)
+                fs["fail"] += 1
+                if fs["m"] + fs["d"] == 0 and fs["fail"] >= 30:
+                    fs["abort"] = "처음 30종목 연속 실패"
+                    break
+            time.sleep(0.08)
+        finfo["naver"] = fs
     st["flows"] = finfo
     for t, f in flows.items():
         if t in out:
