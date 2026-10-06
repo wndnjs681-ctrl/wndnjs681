@@ -1,0 +1,44 @@
+name: canslim-data
+
+# CAN SLIM 재무·수급(C·A·S·I) 수집 — 미국 Yahoo / 국내 WiseReport·FnGuide + KRX 수급.
+# 재무는 7일 지난 종목만 증분 수집, 국내 기관·외국인 수급은 매번 갱신.
+on:
+  schedule:
+    - cron: "10 20 * * 0-4"     # 매주 월~금 05:10 KST (미국 장 마감 후, 국내 개장 전)
+  workflow_dispatch:
+    inputs:
+      markets:
+        description: "us, kr, 또는 us,kr"
+        default: "us,kr"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-full          # 다른 스크리너 워크플로와 output 커밋 충돌 방지
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet requests beautifulsoup4 lxml pykrx
+      - name: Collect CAN SLIM data
+        env:
+          MARKETS: ${{ github.event.inputs.markets || 'us,kr' }}
+          TIME_BUDGET_MIN: "62"
+        run: python canslim_data.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/canslim_*.json
+          git diff --staged --quiet || git commit -m "canslim-data: $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
