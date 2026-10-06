@@ -33,6 +33,7 @@ jobs:
         env:
           MARKETS: ${{ github.event.inputs.markets || 'us,kr' }}
           TIME_BUDGET_MIN: "62"
+          SEC_UA: ${{ secrets.SEC_UA }}       # SEC 요구 형식: "이름 이메일" — 저장소 Settings > Secrets 에 등록
         run: python canslim_data.py
       - name: Commit
         run: |
