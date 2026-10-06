@@ -46,6 +46,10 @@ jobs:
           BB_K: "1.5"
         run: python screener_full.py
 
+      - name: Market index (오닐 시장 방향)
+        continue-on-error: true
+        run: python market_index.py
+
       - name: Commit output
         run: |
           git config user.name  "github-actions[bot]"
