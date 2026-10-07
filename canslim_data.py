@@ -182,8 +182,13 @@ def us_one(sess, crumb, t):
             v = fnum(h.get("epsActual"))
             if v is not None and k not in qe:
                 qe[k] = v
+            est = fnum(h.get("epsEstimate"))
+            if v is not None and est is not None:            # 어닝 서프라이즈(미너비니): [분기, 실제, 예상]
+                rec.setdefault("sur", []).append([k, v, est])
     qk = sorted(set(qe) | set(qr))[-12:]
     rec["q"] = [[k, qe.get(k), qr.get(k), qn.get(k)] for k in qk]
+    if rec.get("sur"):
+        rec["sur"] = sorted(rec["sur"])[-4:]
 
     ye, yr, yn = pick("annualDilutedEPS", "annualBasicEPS"), pick("annualTotalRevenue"), pick("annualNetIncomeCommonStockholders")
     yq, yd = pick("annualStockholdersEquity"), pick("annualTotalDebt")
@@ -252,7 +257,8 @@ def sec_map():
             for v in r.json().values():
                 SEC["map"][str(v["ticker"]).upper().replace(".", "-")] = int(v["cik_str"])
         except Exception as e:
-            note("sec_map", e)
+            ua = os.getenv("SEC_UA") or ""
+            note("sec_map", RuntimeError(f"{e} | SEC_UA 등록됨={bool(ua)} · 이메일 형식={'@' in ua}"))
     return SEC["map"]
 
 
