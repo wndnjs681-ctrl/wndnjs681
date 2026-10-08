@@ -289,24 +289,63 @@ START = (datetime.now(KST) - timedelta(days=LOOKBACK_D)).strftime("%Y-%m-%d")
 NEED = ["Open", "High", "Low", "Close", "Volume"]
 
 
+TAIL = {"behind": 0, "fdr_yahoo": 0, "chart": 0, "stooq": 0, "still": 0, "err": {}}
+
+
+def _terr(k, e):
+    key = f"{k}:{type(e).__name__}:{str(e)[:40]}"
+    TAIL["err"][key] = TAIL["err"].get(key, 0) + 1
+
+
+def _last(d):
+    return pd.Timestamp(d.index[-1]).date()
+
+
 def fetch_ohlcv(code, tries=3):
     d = _fetch_ohlcv(code, tries)
     if d is None and ("." in code or "/" in code):          # BRK.B → BRK-B (야후 표기)
         d = _fetch_ohlcv(code.replace(".", "-").replace("/", "-"), tries)
-    if not code.isdigit():                                  # 미국: 기본 소스에 마지막 봉이 아직 없으면 야후로 다시
+    if code.isdigit() or d is None:
+        return d
+    exp = _us_expected()                                    # 미국: 마지막 거래일 봉이 빠졌으면 다른 소스로 채운다
+    if _last(d) >= exp:
+        return d
+    TAIL["behind"] += 1
+    for name, fn in (("chart", _yahoo_tail), ("stooq", _stooq_tail)):   # FDR 의 YAHOO: 경로는 날짜가 하루 밀려 들어와 뺐다
         try:
-            if d is None or d.index[-1].date() < _us_expected():
-                y = _fetch_ohlcv("YAHOO:" + code.replace(".", "-").replace("/", "-"), 2)
-                if y is not None and (d is None or y.index[-1] > d.index[-1]):
-                    d = y
-        except Exception:
-            pass
-        try:                                                # 그래도 없으면 야후 차트 API 로 최근 봉만 이어 붙인다
-            if d is not None and d.index[-1].date() < _us_expected():
-                d = _yahoo_tail(code, d)
-        except Exception:
-            pass
+            d2 = fn(code, d)
+            if d2 is not None and _last(d2) > _last(d):
+                d = d2
+                TAIL[name] += 1
+                if _last(d) >= exp:
+                    return d
+        except Exception as e:
+            _terr(name, e)
+    TAIL["still"] += 1
     return d
+
+
+def _merge_tail(d, t):
+    t = t.dropna(subset=["Close"])
+    t.index = pd.to_datetime(t.index).tz_localize(None).normalize()
+    base = d.copy(); base.index = pd.to_datetime(base.index).tz_localize(None).normalize()
+    new = t[t.index > base.index[-1]][NEED]
+    return pd.concat([base, new]) if not new.empty else d
+
+
+def _fdr_yahoo(code, d):
+    y = fdr.DataReader("YAHOO:" + code.replace(".", "-").replace("/", "-"), START, END)
+    y = y.rename(columns={c: str(c).capitalize() for c in y.columns})
+    return _merge_tail(d, y[NEED])
+
+
+def _stooq_tail(code, d):
+    import io, requests
+    sym = code.replace("/", "-").lower() + ".us"
+    t = pd.read_csv(io.StringIO(requests.get("https://stooq.com/q/d/l/", params={"s": sym, "i": "d"},
+                                             timeout=15, headers={"User-Agent": "Mozilla/5.0"}).text))
+    t = t.rename(columns={c: str(c).capitalize() for c in t.columns}).set_index("Date").tail(15)
+    return _merge_tail(d, t)
 
 
 def _yahoo_tail(code, d):
@@ -317,14 +356,11 @@ def _yahoo_tail(code, d):
                      headers={"User-Agent": "Mozilla/5.0"})
     res = r.json()["chart"]["result"][0]
     q = res["indicators"]["quote"][0]
-    idx = pd.to_datetime(res["timestamp"], unit="s").normalize()
+    off = int(res.get("meta", {}).get("gmtoffset") or -14400)            # 거래소 현지 날짜로
+    idx = (pd.to_datetime(res["timestamp"], unit="s") + pd.Timedelta(seconds=off)).normalize()
     t = pd.DataFrame({"Open": q["open"], "High": q["high"], "Low": q["low"],
-                      "Close": q["close"], "Volume": q["volume"]}, index=idx).dropna(subset=["Close"])
-    new = t[t.index > d.index[-1]]
-    if new.empty:
-        return d
-    new.index = new.index.tz_localize(d.index.tz) if getattr(d.index, "tz", None) else new.index
-    return pd.concat([d, new])
+                      "Close": q["close"], "Volume": q["volume"]}, index=idx)
+    return _merge_tail(d, t)
 
 
 def _fetch_ohlcv(code, tries=3):
@@ -1159,6 +1195,8 @@ def attach_valuation(market, rows):
 
     filled = sum(1 for r in rows if r.get("per") is not None)
     notes.append(f"PER채움={filled}/{len(rows)}")
+    if TAIL["behind"]:
+        notes.append("마지막봉보강=" + json.dumps(TAIL, ensure_ascii=False)[:600])
     print(f"[{market}] 밸류에이션: " + " | ".join(notes))
     return notes
 
