@@ -14,11 +14,12 @@ CAN SLIM 재무·수급 데이터 수집 — 스크리너 '오닐' 체크리스�
     S  발행주식 수 추이
     I  기관·외국인 60거래일 순매수 금액 (pykrx = KRX, 시장 전체 한 번에)
 
-산출물: output/canslim_{kr,us}.json
+산출물: output/canslim_{kr,us}.json, output/consensus_kr.json(국내 12M 선행·후행 EPS, BPS → screener_full.py)
   {"asof":..., "n":..., "diag":{...}, "p":{ticker:{
       "q":[["2025-06", eps, 매출, 순이익], ...]  (오래된→최근, 실적만, 추정치 제외)
       "y":[["2024", eps, 매출, 순이익, 자본, 부채비율], ...]
       "sh":[["2024-12", 주식수], ...], "fl": 유통주식수, "so": 발행주식수,
+      "fe":[["2026-12", 추정EPS], ...]  (국내: 연간 컨센서스 추정 EPS, 없으면 빈 목록)
       "roe": ROE%, "ih": 기관보유%, "ic": 기관수, "inet": [증가 기관수, 감소 기관수], "ipc": 상위기관 평균 증감%,
       "inst60": 기관 60일 순매수(억원), "frgn60": 외국인 60일 순매수(억원),
       "src": "...", "at": "YYYY-MM-DD"}}}
@@ -96,6 +97,8 @@ def stale(rec):
     if not rec or not (rec.get("q") or rec.get("y")):
         return True
     if len(rec.get("q") or []) < 5 or rec.get("src") == "Yahoo":   # 전년 동기 비교가 안 되는 기록은 다시 받는다
+        return True
+    if rec.get("y") and "fe" not in rec:                     # 추정 EPS 를 모으기 전 기록 → 한 번 다시 받는다
         return True
     return (rec.get("at") or "0000") < (NOW - timedelta(days=REFRESH_DAYS)).strftime("%Y-%m-%d")
 
@@ -405,6 +408,8 @@ def _parse_table(tbl):
                 continue
             pri[key] = hit
             data[key] = {p: fnum(td.get_text(strip=True)) for (p, e), td in zip(cols, tds) if not e}
+            if key == "eps":                    # 추정치(E) 열의 EPS 는 따로 — 12개월 선행 EPS 재료
+                data["eps_e"] = {p: fnum(td.get_text(strip=True)) for (p, e), td in zip(cols, tds) if e}
     return data, [p for p, e in cols if not e]
 
 
@@ -463,6 +468,7 @@ def kr_rec(res):
         rec["y"] = [[p[:4], d.get("eps", {}).get(p), d.get("rev", {}).get(p), d.get("ni", {}).get(p),
                      d.get("eq", {}).get(p), d.get("debt", {}).get(p), d.get("roe", {}).get(p)] for p in ps]
         rec["sh"] = [[p, d.get("sh", {}).get(p)] for p in ps if d.get("sh", {}).get(p)]
+        rec["fe"] = [[p, v] for p, v in sorted((d.get("eps_e") or {}).items()) if v is not None]   # 연간 추정 EPS(결산월 기준)
         roes = [x for x in (d.get("roe") or {}).values() if x is not None]
         if roes:
             rec["roe"] = list(d["roe"].values())[-1] if list(d["roe"].values())[-1] is not None else roes[-1]
@@ -629,6 +635,54 @@ def run_kr(tickers, prev):
     return out, st
 
 
+def _months(a, b):
+    """'YYYY-MM' b 가 a 보다 몇 개월 뒤인가."""
+    return (int(b[:4]) - int(a[:4])) * 12 + int(b[5:7]) - int(a[5:7])
+
+
+def fwd12_eps(fe, today=None):
+    """연간 추정 EPS 들로 12개월 선행 EPS — FnGuide 방식(남은 개월 수로 FY1·FY2 가중).
+    FY1 = 결산월이 이번 달 이후인 첫 추정 연도, FY2 = 그다음 해."""
+    cur = (today or NOW).strftime("%Y-%m")
+    fut = [(p, v) for p, v in sorted(fe or []) if v is not None and p >= cur]
+    if not fut:
+        return None, None
+    (p1, e1) = fut[0]
+    left = min(12, max(0, _months(cur, p1)))             # FY1 결산까지 남은 개월 수
+    if len(fut) >= 2 and _months(p1, fut[1][0]) == 12:
+        e2 = fut[1][1]
+        return e1 * left / 12 + e2 * (12 - left) / 12, f"{p1[:4]}E·{fut[1][0][:4]}E"
+    if left >= 9:                                         # FY2 추정이 없으면 FY1 이 12개월의 대부분일 때만 쓴다
+        return e1, f"{p1[:4]}E"
+    return None, None
+
+
+def write_consensus_kr(out):
+    """canslim 국내 기록 → output/consensus_kr.json. screener_full.py 가 이 파일을 읽어
+    오늘 종가로 선행 PER(종가 ÷ 12M 선행 EPS)과 후행 PER·PBR 을 계산한다."""
+    m, st = {}, dict(fwd=0, eps=0, bps=0)
+    for t, r in out.items():
+        rec = {}
+        fe, basis = fwd12_eps(r.get("fe"))
+        if fe is not None:
+            rec["fwd_eps"] = round(fe, 1); rec["fwd_basis"] = basis; st["fwd"] += 1
+        q = [x for x in (r.get("q") or []) if x[1] is not None]
+        if len(q) >= 4 and _months(q[-4][0], q[-1][0]) == 9:   # 연속된 최근 4개 분기 EPS 합 = 후행 12개월 EPS
+            rec["eps"] = round(sum(x[1] for x in q[-4:]), 1); st["eps"] += 1
+        y = r.get("y") or []
+        sh = [x[1] for x in (r.get("sh") or []) if x[1]]
+        if y and (y[-1][4] or 0) > 0 and sh:                            # 지배주주지분(억원) ÷ 최근 발행주식수
+            rec["bps"] = round(y[-1][4] * 1e8 / sh[-1], 1); st["bps"] += 1
+        if rec:
+            m[t] = rec
+    p = os.path.join(OUT_DIR, "consensus_kr.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"generated_at": NOW.isoformat(timespec="seconds"),
+                   "src": "WiseReport·FnGuide 재무요약(연간 추정치) — canslim_data.py",
+                   "stats": st, "map": m}, f, ensure_ascii=False, separators=(",", ":"))
+    print(f"[kr] 컨센서스 {len(m)}종목 · 선행EPS {st['fwd']} · 후행EPS {st['eps']} · BPS {st['bps']} → {p}", flush=True)
+
+
 def main():
     mks = [m.strip() for m in os.getenv("MARKETS", "us,kr").split(",") if m.strip()]
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -649,6 +703,8 @@ def main():
         with open(p, "w", encoding="utf-8") as f:
             json.dump({"asof": TODAY, "n": n_ok, "diag": st, "p": out}, f, ensure_ascii=False, separators=(",", ":"))
         print(f"[{mk}] 재무 {n_ok}/{len(tk)}종목 · {json.dumps(st, ensure_ascii=False)[:600]} · {os.path.getsize(p):,} bytes", flush=True)
+        if mk == "kr":
+            write_consensus_kr(out)
 
 
 if __name__ == "__main__":
