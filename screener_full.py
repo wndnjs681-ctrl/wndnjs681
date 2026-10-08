@@ -291,6 +291,26 @@ NEED = ["Open", "High", "Low", "Close", "Volume"]
 
 TAIL = {"behind": 0, "chart": 0, "stooq": 0, "still": 0, "err": {}}
 _TAIL_LOCK = threading.Lock()
+TAIL_TIMEOUT = 5                                            # 보강 요청 타임아웃(초)
+TAIL_PROBE = 15                                             # 경로별 처음 이만큼 시도해 한 번도 못 채우면 그 경로는 끈다
+_TRY = {"chart": 0, "stooq": 0}
+_OFF = set()
+
+
+def _route_ok(name):
+    """차단기: 이 경로를 이번 종목에 시도해도 되는가. 되면 시도 횟수를 센다."""
+    with _TAIL_LOCK:
+        if name in _OFF:
+            return False
+        _TRY[name] += 1
+        return True
+
+
+def _route_fail(name):
+    with _TAIL_LOCK:
+        if name not in _OFF and TAIL[name] == 0 and _TRY[name] >= TAIL_PROBE:
+            _OFF.add(name)
+            print(f"  [us] 보강 경로 '{name}' 차단: 처음 {_TRY[name]}번 시도에서 한 번도 못 채움", flush=True)
 
 
 def _tinc(k):
@@ -307,8 +327,10 @@ def _terr(k, e):
 def tail_diag():
     """미국 마지막봉 보강 결과 한 줄 — universe_us.json 의 diag 에 남긴다."""
     err = ",".join(f"{k}={v}" for k, v in sorted(TAIL["err"].items(), key=lambda x: -x[1])) or "없음"
-    return (f"마지막봉보강(기준일={_us_expected()}): 늦음={TAIL['behind']} 차트={TAIL['chart']} "
-            f"스투크={TAIL['stooq']} 미해결={TAIL['still']} 오류[{err}]")
+    off = ",".join(sorted(_OFF)) or "없음"
+    return (f"마지막봉보강(기준일={_us_expected()}): 늦음={TAIL['behind']} "
+            f"차트={TAIL['chart']}/{_TRY['chart']}시도 스투크={TAIL['stooq']}/{_TRY['stooq']}시도 "
+            f"미해결={TAIL['still']} 차단된경로[{off}] 오류[{err}]")
 
 
 def _last(d):
@@ -326,6 +348,8 @@ def fetch_ohlcv(code, tries=3):
         return d
     _tinc("behind")
     for name, fn in (("chart", _yahoo_tail), ("stooq", _stooq_tail)):   # FDR 의 YAHOO: 경로는 날짜가 하루 밀려 들어와 쓰지 않는다
+        if not _route_ok(name):
+            continue
         try:
             d2 = fn(code, d)
             if d2 is not None and _last(d2) > _last(d):
@@ -333,8 +357,10 @@ def fetch_ohlcv(code, tries=3):
                 _tinc(name)
                 if _last(d) >= exp:
                     return d
+                continue
         except Exception as e:
             _terr(name, e)
+        _route_fail(name)
     _tinc("still")
     return d
 
@@ -351,7 +377,7 @@ def _stooq_tail(code, d):
     import io, requests
     sym = code.replace("/", "-").lower() + ".us"
     t = pd.read_csv(io.StringIO(requests.get("https://stooq.com/q/d/l/", params={"s": sym, "i": "d"},
-                                             timeout=15, headers={"User-Agent": "Mozilla/5.0"}).text))
+                                             timeout=TAIL_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"}).text))
     t = t.rename(columns={c: str(c).capitalize() for c in t.columns}).set_index("Date").tail(15)
     return _merge_tail(d, t)
 
@@ -362,7 +388,7 @@ def _yahoo_tail(code, d):
     r = None
     for host in ("query1", "query2"):
         r = requests.get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{sym}",
-                         params={"range": "10d", "interval": "1d"}, timeout=15,
+                         params={"range": "10d", "interval": "1d"}, timeout=TAIL_TIMEOUT,
                          headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code == 200:
             break
