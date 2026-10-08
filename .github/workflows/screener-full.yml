@@ -48,6 +48,12 @@ jobs:
           BB_K: "1.5"
         run: python screener_full.py
 
+      - name: Momentum TOP5 (아침 리포트용)
+        continue-on-error: true
+        env:
+          MARKETS: ${{ github.event.inputs.markets || (github.event.schedule == '10 21 * * 1-5' && 'us' || 'kr,us') }}
+        run: python daily_top5.py
+
       - name: Market index (오닐 시장 방향)
         continue-on-error: true
         run: python market_index.py
