@@ -17,7 +17,7 @@
 
 투자 권유가 아니며 종목 발굴 보조 자료입니다.
 """
-import json, os, sys, time, traceback
+import json, os, sys, threading, time, traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
@@ -289,12 +289,26 @@ START = (datetime.now(KST) - timedelta(days=LOOKBACK_D)).strftime("%Y-%m-%d")
 NEED = ["Open", "High", "Low", "Close", "Volume"]
 
 
-TAIL = {"behind": 0, "fdr_yahoo": 0, "chart": 0, "stooq": 0, "still": 0, "err": {}}
+TAIL = {"behind": 0, "chart": 0, "stooq": 0, "still": 0, "err": {}}
+_TAIL_LOCK = threading.Lock()
+
+
+def _tinc(k):
+    with _TAIL_LOCK:
+        TAIL[k] += 1
 
 
 def _terr(k, e):
-    key = f"{k}:{type(e).__name__}:{str(e)[:40]}"
-    TAIL["err"][key] = TAIL["err"].get(key, 0) + 1
+    key = f"{k}:{type(e).__name__}"                         # 오류 종류별로 센다
+    with _TAIL_LOCK:
+        TAIL["err"][key] = TAIL["err"].get(key, 0) + 1
+
+
+def tail_diag():
+    """미국 마지막봉 보강 결과 한 줄 — universe_us.json 의 diag 에 남긴다."""
+    err = ",".join(f"{k}={v}" for k, v in sorted(TAIL["err"].items(), key=lambda x: -x[1])) or "없음"
+    return (f"마지막봉보강(기준일={_us_expected()}): 늦음={TAIL['behind']} 차트={TAIL['chart']} "
+            f"스투크={TAIL['stooq']} 미해결={TAIL['still']} 오류[{err}]")
 
 
 def _last(d):
@@ -310,18 +324,18 @@ def fetch_ohlcv(code, tries=3):
     exp = _us_expected()                                    # 미국: 마지막 거래일 봉이 빠졌으면 다른 소스로 채운다
     if _last(d) >= exp:
         return d
-    TAIL["behind"] += 1
-    for name, fn in (("chart", _yahoo_tail), ("stooq", _stooq_tail)):   # FDR 의 YAHOO: 경로는 날짜가 하루 밀려 들어와 뺐다
+    _tinc("behind")
+    for name, fn in (("chart", _yahoo_tail), ("stooq", _stooq_tail)):   # FDR 의 YAHOO: 경로는 날짜가 하루 밀려 들어와 쓰지 않는다
         try:
             d2 = fn(code, d)
             if d2 is not None and _last(d2) > _last(d):
                 d = d2
-                TAIL[name] += 1
+                _tinc(name)
                 if _last(d) >= exp:
                     return d
         except Exception as e:
             _terr(name, e)
-    TAIL["still"] += 1
+    _tinc("still")
     return d
 
 
@@ -331,12 +345,6 @@ def _merge_tail(d, t):
     base = d.copy(); base.index = pd.to_datetime(base.index).tz_localize(None).normalize()
     new = t[t.index > base.index[-1]][NEED]
     return pd.concat([base, new]) if not new.empty else d
-
-
-def _fdr_yahoo(code, d):
-    y = fdr.DataReader("YAHOO:" + code.replace(".", "-").replace("/", "-"), START, END)
-    y = y.rename(columns={c: str(c).capitalize() for c in y.columns})
-    return _merge_tail(d, y[NEED])
 
 
 def _stooq_tail(code, d):
@@ -351,9 +359,14 @@ def _stooq_tail(code, d):
 def _yahoo_tail(code, d):
     sym = code.replace(".", "-").replace("/", "-")
     import requests
-    r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
-                     params={"range": "10d", "interval": "1d"}, timeout=15,
-                     headers={"User-Agent": "Mozilla/5.0"})
+    r = None
+    for host in ("query1", "query2"):
+        r = requests.get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{sym}",
+                         params={"range": "10d", "interval": "1d"}, timeout=15,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200:
+            break
+    r.raise_for_status()
     res = r.json()["chart"]["result"][0]
     q = res["indicators"]["quote"][0]
     off = int(res.get("meta", {}).get("gmtoffset") or -14400)            # 거래소 현지 날짜로
@@ -1195,8 +1208,6 @@ def attach_valuation(market, rows):
 
     filled = sum(1 for r in rows if r.get("per") is not None)
     notes.append(f"PER채움={filled}/{len(rows)}")
-    if TAIL["behind"]:
-        notes.append("마지막봉보강=" + json.dumps(TAIL, ensure_ascii=False)[:600])
     print(f"[{market}] 밸류에이션: " + " | ".join(notes))
     return notes
 
@@ -1211,9 +1222,9 @@ def build_series(market, data, rows):
     MA120·BB150 이 끊기지 않는다."""
     keep = {r["ticker"] for r in rows}
     # 날짜 축은 가장 봉이 많은 종목 기준으로 하나만 싣는다 (휴장일은 시장 공통)
-    base = None
+    base = None                                           # 마지막 날짜가 가장 늦고, 그중 봉이 가장 많은 종목
     for t, d in data.items():
-        if t in keep and (base is None or len(d) > len(base)):
+        if t in keep and len(d) and (base is None or (d.index[-1], len(d)) > (base.index[-1], len(base))):
             base = d
     if base is None:
         return None
@@ -1279,6 +1290,8 @@ def run_market(market, uni):
             if i % 200 == 0:
                 print(f"  [{market}] {i}/{len(fut)}")
     print(f"[{market}] fetched ok={len(data):,} failed={failed:,}")
+    if market == "us":
+        print(f"[{market}] " + tail_diag())
 
     rows = []
     for _, r in uni.iterrows():
@@ -1368,7 +1381,8 @@ def run_market(market, uni):
         "count": len(rows),
         "failed": failed,
         "params": {"bb_len": BB_LEN, "bb_k": BB_K},
-        "diag": DIAG.get(market + "_sector", []) + DIAG.get(market + "_valuation", []),
+        "diag": DIAG.get(market + "_sector", []) + DIAG.get(market + "_valuation", [])
+                + ([tail_diag()] if market == "us" else []),
         "schema": sch,
         "rows": rows,
     }
