@@ -301,7 +301,30 @@ def fetch_ohlcv(code, tries=3):
                     d = y
         except Exception:
             pass
+        try:                                                # 그래도 없으면 야후 차트 API 로 최근 봉만 이어 붙인다
+            if d is not None and d.index[-1].date() < _us_expected():
+                d = _yahoo_tail(code, d)
+        except Exception:
+            pass
     return d
+
+
+def _yahoo_tail(code, d):
+    sym = code.replace(".", "-").replace("/", "-")
+    import requests
+    r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                     params={"range": "10d", "interval": "1d"}, timeout=15,
+                     headers={"User-Agent": "Mozilla/5.0"})
+    res = r.json()["chart"]["result"][0]
+    q = res["indicators"]["quote"][0]
+    idx = pd.to_datetime(res["timestamp"], unit="s").normalize()
+    t = pd.DataFrame({"Open": q["open"], "High": q["high"], "Low": q["low"],
+                      "Close": q["close"], "Volume": q["volume"]}, index=idx).dropna(subset=["Close"])
+    new = t[t.index > d.index[-1]]
+    if new.empty:
+        return d
+    new.index = new.index.tz_localize(d.index.tz) if getattr(d.index, "tz", None) else new.index
+    return pd.concat([d, new])
 
 
 def _fetch_ohlcv(code, tries=3):
@@ -313,7 +336,8 @@ def _fetch_ohlcv(code, tries=3):
             d = d.rename(columns={c: str(c).capitalize() for c in d.columns})
             if not all(c in d.columns for c in NEED):
                 return None
-            return d[NEED].sort_index()
+            d = d[NEED].sort_index().dropna(subset=["Close"])   # 소스가 마지막 날 빈 봉(NaN)을 주는 경우가 있다
+            return d if not d.empty else None
         except Exception:
             if a == tries - 1:
                 return None
