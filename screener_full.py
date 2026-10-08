@@ -20,12 +20,14 @@
 import json, os, re, sys, threading, time, traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import FinanceDataReader as fdr
 
 KST = timezone(timedelta(hours=9))
+ET = ZoneInfo("America/New_York")
 
 # ── 실행 파라미터 (워크플로 env 로 덮어쓸 수 있음) ─────────────
 MIN_CAP_KR = float(os.getenv("MIN_CAP_EOK", "500"))      # 국내 최소 시총(억)
@@ -282,9 +284,10 @@ END = (datetime.now(KST) + timedelta(days=1)).strftime("%Y-%m-%d")   # 끝 날�
 
 
 def _us_expected():
-    """지금 시점에 나와 있어야 할 미국 마지막 거래일(동부시간 16:30 이후면 오늘, 아니면 직전 평일)."""
-    et = datetime.now(timezone.utc) - timedelta(hours=4)
-    d = et.date() if (et.hour, et.minute) >= (16, 30) else et.date() - timedelta(days=1)
+    """지금 시점에 나와 있어야 할 미국 마지막 거래일(동부시간 16:05 이후면 오늘, 아니면 직전 평일 — 장은 16:00 마감).
+    이보다 늦은 날짜의 봉은 장중 현재가라 쓰지 않는다. 서머타임은 zoneinfo 가 맞춘다."""
+    et = datetime.now(ET)
+    d = et.date() if (et.hour, et.minute) >= (16, 5) else et.date() - timedelta(days=1)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
@@ -336,6 +339,13 @@ def tail_diag():
             f"미해결={TAIL['still']} 차단된경로[{off}] 오류[{err}]")
 
 
+def _upto(d, day):
+    if d is None:
+        return None
+    d = d[pd.to_datetime(d.index).date <= day]
+    return d if not d.empty else None
+
+
 def _last(d):
     return pd.Timestamp(d.index[-1]).date()
 
@@ -362,14 +372,15 @@ def fetch_ohlcv(code, tries=3):
             d = d[pd.to_datetime(d.index).date < datetime.now(KST).date()]
         return d if not d.empty else None
     exp = _us_expected()                                    # 미국: 마지막 거래일 봉이 빠졌으면 다른 소스로 채운다
-    if _last(d) >= exp:
+    d = _upto(d, exp)                                       # 장중에 돌면 당일 봉은 현재가 — 마지막 확정 거래일까지만
+    if d is None or _last(d) >= exp:
         return d
     _tinc("behind")
     for name, fn in (("chart", _yahoo_tail), ("stooq", _stooq_tail)):   # FDR 의 YAHOO: 경로는 날짜가 하루 밀려 들어와 쓰지 않는다
         if not _route_ok(name):
             continue
         try:
-            d2 = fn(code, d)
+            d2 = _upto(fn(code, d), exp)
             if d2 is not None and _last(d2) > _last(d):
                 d = d2
                 _tinc(name)

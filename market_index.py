@@ -9,6 +9,7 @@
 """
 import json, os, sys, time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import requests
 
 OUT_DIR = os.getenv("OUT_DIR", "output")
@@ -29,7 +30,7 @@ def yahoo(sym):
             for t, cl, vo in zip(res["timestamp"], q["close"], q["volume"]):
                 if cl is None:
                     continue
-                d.append(datetime.fromtimestamp(t, KST if sym.startswith("^K") else timezone(timedelta(hours=-5))).strftime("%Y-%m-%d"))
+                d.append(datetime.fromtimestamp(t, KST if sym.startswith("^K") else ZoneInfo("America/New_York")).strftime("%Y-%m-%d"))
                 c.append(round(cl, 2)); v.append(int(vo or 0))
             if len(c) > 100:
                 return d, c, v
@@ -63,6 +64,11 @@ def main():
         now = datetime.now(KST)
         if mk == "kr" and now.weekday() < 5 and (now.hour, now.minute) < (15, 40) and d and d[-1] >= now.strftime("%Y-%m-%d"):
             d, c, v = d[:-1], c[:-1], v[:-1]               # 장중 실행: 당일 봉은 현재가라 뺀다
+        if mk == "us":                                      # 미국도 마감(동부 16:00, 여유 5분) 전이면 당일 봉을 뺀다
+            et = datetime.now(ZoneInfo("America/New_York"))
+            lastok = et.date() if (et.hour, et.minute) >= (16, 5) else et.date() - timedelta(days=1)
+            while d and d[-1] > lastok.strftime("%Y-%m-%d"):
+                d, c, v = d[:-1], c[:-1], v[:-1]
         out[key] = {"name": name, "mk": mk, "d": d[-400:], "c": c[-400:], "v": v[-400:]}
         print(f"[{key}] {name} {len(d)}일 · 마지막 {d[-1]} {c[-1]:,} · 거래량 0인 날 {sum(1 for x in v[-60:] if not x)}/60")
     if not out:
