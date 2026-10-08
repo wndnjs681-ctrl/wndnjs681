@@ -29,7 +29,10 @@ KST = timezone(timedelta(hours=9))
 
 # ── 실행 파라미터 (워크플로 env 로 덮어쓸 수 있음) ─────────────
 MIN_CAP_KR = float(os.getenv("MIN_CAP_EOK", "500"))      # 국내 최소 시총(억)
-MIN_VAL_KR = float(os.getenv("MIN_VALUE_EOK", "3"))      # 국내 최소 거래대금(억)
+MIN_VAL_KR = float(os.getenv("MIN_VALUE_EOK", "3"))      # 국내 최소 거래대금(억) — 20거래일 평균 기준
+KEEP_CAP, KEEP_VAL = 0.9, 0.7                               # 직전 유니버스 종목은 기준의 90%·70% 까지는 남긴다(경계 들락날락 방지)
+MCAP_REF = os.path.join("output", "kr_mcap_ref.json")      # 시총이 있는 실행분의 시총·종가 — 리스팅에 시총이 빠졌을 때 쓴다
+PREV_KR = set()
 MIN_CAP_US = float(os.getenv("MIN_CAP_MUSD", "1000"))    # 미국 최소 시총(백만달러)
 MAX_KR     = int(os.getenv("MAX_KR", "2600"))
 MAX_US     = int(os.getenv("MAX_US", "1200"))
@@ -899,6 +902,30 @@ def universe_kr():
             u.loc[blank_seg, "market_seg"] = u.loc[blank_seg, "ticker"].map(
                 lambda t: md.get(t, {}).get("seg", ""))
 
+    # 리스팅에 시총이 있으면 참조 파일로 남기고, 없으면(장중·KRX 차단) 참조 파일의 시총으로 거른다.
+    # 시총 필터가 통째로 빠지면 유니버스가 두 배로 부풀어 실행마다 종목 수가 크게 달라진다.
+    px = _col(df, "Close", "종가")
+    u["ref_px"] = np.nan
+    if u["mcap"].notna().mean() >= 0.5:
+        try:
+            ref = {t: [round(float(m), 1), float(c) if pd.notna(c) else None]
+                   for t, m, c in zip(u["ticker"], u["mcap"],
+                                      pd.to_numeric(px, errors="coerce") if px is not None else [np.nan] * len(u))
+                   if pd.notna(m) and m > 0}
+            with open(MCAP_REF, "w", encoding="utf-8") as f:
+                json.dump({"at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "m": ref}, f, separators=(",", ":"))
+        except Exception as e:
+            print(f"시총 참조 파일 저장 실패: {e}", file=sys.stderr)
+    else:
+        try:
+            ref = json.load(open(MCAP_REF, encoding="utf-8"))
+            u["mcap"] = u["ticker"].map(lambda t: (ref["m"].get(t) or [np.nan])[0])
+            u["ref_px"] = u["ticker"].map(lambda t: (ref["m"].get(t) or [None, None])[1])
+            DIAG["kr_market"] = DIAG.get("kr_market", []) + [f"시총=참조파일({ref.get('at')}, {int(u['mcap'].notna().sum())}종목)"]
+        except Exception as e:
+            DIAG["kr_market"] = DIAG.get("kr_market", []) + [f"시총=없음(참조파일 {type(e).__name__})"]
+        print("시총 보완: " + DIAG["kr_market"][-1])
+
     # KONEX 는 거래가 거의 없어 지표가 의미를 갖지 못한다 — 유니버스에서 제외
     u = u[~u["market_seg"].str.upper().str.contains("KONEX|코넥스", na=False)]
 
@@ -912,10 +939,14 @@ def universe_kr():
     u = u[~u["name"].str.contains("스팩", na=False)]
     u = u[~u["name"].str.contains(r"우[A-Z]?$|\d우", regex=True, na=False)]
     u = u[u["ticker"].str.endswith("0")]
+    global PREV_KR
+    prev = previous_universe("kr")
+    # 시총이 빠진 채 부풀었던 실행분은 '직전 유니버스'로 치지 않는다
+    PREV_KR = set(prev["ticker"]) if prev is not None and prev["mcap"].notna().mean() >= 0.5 else set()
     if u["mcap"].notna().any():
-        u = u[u["mcap"].fillna(0) >= MIN_CAP_KR]
-    if u["value"].notna().any():
-        u = u[u["value"].fillna(0) >= MIN_VAL_KR]
+        cap = u["mcap"].fillna(0)
+        u = u[(cap >= MIN_CAP_KR) | (u["ticker"].isin(PREV_KR) & (cap >= MIN_CAP_KR * KEEP_CAP))]
+    # 거래대금은 하루치가 아니라 20거래일 평균으로 run_market 에서 거른다(하루치는 종목이 매일 들락날락한다)
     try:
         adm = fdr.StockListing("KRX-ADMINISTRATIVE")
         ac = _col(adm, "Code", "Symbol", "종목코드")
@@ -1319,11 +1350,18 @@ def run_market(market, uni):
     if market == "us":
         print(f"[{market}] " + tail_diag())
 
-    rows = []
+    rows, thin = [], 0
     for _, r in uni.iterrows():
         d = data.get(r["ticker"])
         if d is None:
             continue
+        if market == "kr":                                  # 20거래일 평균 거래대금(억)
+            tail = d.iloc[-20:]
+            avg = float((tail["Close"].astype(float) * tail["Volume"].astype(float)).mean()) / 1e8
+            need = MIN_VAL_KR * (KEEP_VAL if r["ticker"] in PREV_KR else 1.0)
+            if not np.isfinite(avg) or avg < need:
+                thin += 1
+                continue
         m = compute_metrics(d)
         if not m:
             continue
@@ -1331,6 +1369,9 @@ def run_market(market, uni):
         m["name"] = r["name"]
         m["sector"] = _safe_str(r.get("sector"))
         mc, vl = r.get("mcap"), r.get("value")
+        rp = r.get("ref_px")
+        if pd.notna(mc) and pd.notna(rp) and rp:              # 참조 파일 시총 → 오늘 종가 비율로 맞춘다
+            mc = mc * float(d["Close"].iloc[-1]) / float(rp)
         m["mcap"] = _r(mc, 0) if pd.notna(mc) else None
         # 거래대금이 리스팅에 없으면 마지막 봉으로 추정
         if pd.notna(vl):
@@ -1342,6 +1383,11 @@ def run_market(market, uni):
         rows.append(m)
 
     rows.sort(key=lambda x: (x.get("value") or 0), reverse=True)
+    if market == "kr":
+        DIAG["kr_market"] = DIAG.get("kr_market", []) + [
+            f"유니버스: 후보 {len(uni)} → 20일평균거래대금 {MIN_VAL_KR:g}억 미만 {thin} 제외 → {len(rows)}종목"
+            f" (직전 {len(PREV_KR)}종목, 유지기준 시총·거래대금 {KEEP_CAP:.0%}·{KEEP_VAL:.0%})"]
+        print("[kr] " + DIAG["kr_market"][-1])
 
     # 종목이 3개 미만인 꼬리 업종은 '기타' 로 묶는다 (섹터 화면이 잘게 부서지는 것 방지)
     cnt = {}
@@ -1410,7 +1456,7 @@ def run_market(market, uni):
         "failed": failed,
         "params": {"bb_len": BB_LEN, "bb_k": BB_K},
         "diag": DIAG.get(market + "_sector", []) + DIAG.get(market + "_valuation", [])
-                + ([tail_diag()] if market == "us" else []),
+                + DIAG.get(market + "_market", []) + ([tail_diag()] if market == "us" else []),
         "schema": sch,
         "rows": rows,
     }
