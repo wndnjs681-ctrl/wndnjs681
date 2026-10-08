@@ -275,7 +275,16 @@ SCHEMA = [
 # ══════════════════════════════════════════════════════════════
 # 데이터 수집
 # ══════════════════════════════════════════════════════════════
-END = datetime.now(KST).strftime("%Y-%m-%d")
+END = (datetime.now(KST) + timedelta(days=1)).strftime("%Y-%m-%d")   # 끝 날짜를 배제하는 소스가 있어 하루 뒤까지
+
+
+def _us_expected():
+    """지금 시점에 나와 있어야 할 미국 마지막 거래일(동부시간 16:30 이후면 오늘, 아니면 직전 평일)."""
+    et = datetime.now(timezone.utc) - timedelta(hours=4)
+    d = et.date() if (et.hour, et.minute) >= (16, 30) else et.date() - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 START = (datetime.now(KST) - timedelta(days=LOOKBACK_D)).strftime("%Y-%m-%d")
 NEED = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -284,6 +293,14 @@ def fetch_ohlcv(code, tries=3):
     d = _fetch_ohlcv(code, tries)
     if d is None and ("." in code or "/" in code):          # BRK.B → BRK-B (야후 표기)
         d = _fetch_ohlcv(code.replace(".", "-").replace("/", "-"), tries)
+    if not code.isdigit():                                  # 미국: 기본 소스에 마지막 봉이 아직 없으면 야후로 다시
+        try:
+            if d is None or d.index[-1].date() < _us_expected():
+                y = _fetch_ohlcv("YAHOO:" + code.replace(".", "-").replace("/", "-"), 2)
+                if y is not None and (d is None or y.index[-1] > d.index[-1]):
+                    d = y
+        except Exception:
+            pass
     return d
 
 
