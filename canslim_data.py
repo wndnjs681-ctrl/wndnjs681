@@ -14,7 +14,7 @@ CAN SLIM 재무·수급 데이터 수집 — 스크리너 '오닐' 체크리스�
     S  발행주식 수 추이
     I  기관·외국인 60거래일 순매수 금액 (pykrx = KRX, 시장 전체 한 번에)
 
-산출물: output/canslim_{kr,us}.json, output/consensus_kr.json(국내 12M 선행·후행 EPS, BPS → screener_full.py)
+산출물: output/canslim_{kr,us}.json, output/consensus_auto_kr.json(국내 12M 선행·후행 EPS, BPS → screener_full.py)
   {"asof":..., "n":..., "diag":{...}, "p":{ticker:{
       "q":[["2025-06", eps, 매출, 순이익], ...]  (오래된→최근, 실적만, 추정치 제외)
       "y":[["2024", eps, 매출, 순이익, 자본, 부채비율], ...]
@@ -658,8 +658,10 @@ def fwd12_eps(fe, today=None):
 
 
 def write_consensus_kr(out):
-    """canslim 국내 기록 → output/consensus_kr.json. screener_full.py 가 이 파일을 읽어
-    오늘 종가로 선행 PER(종가 ÷ 12M 선행 EPS)과 후행 PER·PBR 을 계산한다."""
+    """canslim 국내 기록 → output/consensus_auto_kr.json. screener_full.py 가 이 파일과
+    수동 파일(output/consensus_kr.json, make_consensus_kr.py)을 머지해 — 충돌 시 수동 우선 —
+    오늘 종가로 선행 PER(종가 ÷ 12M 선행 EPS)과 후행 PER·PBR 을 계산한다.
+    수동 파일을 덮어쓰지 않도록 파일명을 따로 쓴다."""
     m, st = {}, dict(fwd=0, eps=0, bps=0)
     for t, r in out.items():
         rec = {}
@@ -675,7 +677,7 @@ def write_consensus_kr(out):
             rec["bps"] = round(y[-1][4] * 1e8 / sh[-1], 1); st["bps"] += 1
         if rec:
             m[t] = rec
-    p = os.path.join(OUT_DIR, "consensus_kr.json")
+    p = os.path.join(OUT_DIR, "consensus_auto_kr.json")
     with open(p, "w", encoding="utf-8") as f:
         json.dump({"generated_at": NOW.isoformat(timespec="seconds"),
                    "src": "WiseReport·FnGuide 재무요약(연간 추정치) — canslim_data.py",

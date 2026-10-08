@@ -36,6 +36,7 @@ jobs:
       - name: Run screener
         env:
           PYTHONUNBUFFERED: "1"
+          KRX_FUND: "0"            # KRX 실적 화면은 액션 IP 에서 400 'LOGOUT' — 커밋된 컨센서스 파일로 계산
           MARKETS: ${{ github.event.inputs.markets || (github.event.schedule == '10 21 * * 1-5' && 'us' || 'kr,us') }}
           MIN_CAP_EOK: "500"
           MIN_VALUE_EOK: "3"

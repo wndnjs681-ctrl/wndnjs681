@@ -1132,10 +1132,8 @@ def yahoo_fundamentals(symbols):
     return out, notes
 
 
-def load_consensus_kr():
-    """로컬에서 뽑아 커밋해 둔 국내 컨센서스(output/consensus_kr.json)."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "output", "consensus_kr.json")
+def _read_consensus(name):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", name)
     if not os.path.exists(path):
         return {}, "파일없음"
     try:
@@ -1145,6 +1143,20 @@ def load_consensus_kr():
         return {}, f"읽기실패:{type(e).__name__}"
     m = d.get("map") or {}
     return m, f"{len(m)}종목(생성 {str(d.get('generated_at'))[:10]})"
+
+
+def load_consensus_kr():
+    """국내 컨센서스 = 수동(output/consensus_kr.json, make_consensus_kr.py) +
+    자동(output/consensus_auto_kr.json, canslim_data.py). 종목·필드 단위로 머지하고,
+    같은 종목의 같은 필드가 둘 다 있으면 수동 파일 값을 쓴다."""
+    man, mnote = _read_consensus("consensus_kr.json")
+    auto, anote = _read_consensus("consensus_auto_kr.json")
+    m = {}
+    for src in (auto, man):                                 # 수동을 나중에 덮어써 우선시
+        for t, v in src.items():
+            if isinstance(v, dict):
+                m.setdefault(t, {}).update({k: x for k, x in v.items() if x is not None})
+    return m, f"{len(m)}종목[수동 {mnote} · 자동 {anote}]"
 
 
 def previous_universe(market):
@@ -1175,17 +1187,21 @@ def attach_valuation(market, rows):
     fund, fwd, hist = {}, {}, {}
 
     if market == "kr":
-        try:
-            fund, note = krx_fundamental()
-            notes.append(f"KRX실적={len(fund)}종목{note}")
-        except Exception as e:
-            notes.append(f"KRX실적=예외:{type(e).__name__}:{str(e)[:50]}")
+        # 액션 러너 IP 에서는 KRX 실적 화면이 4변형 모두 400 'LOGOUT' — 기본은 건너뛰고 파일로 간다
+        if os.getenv("KRX_FUND", "0") != "0":
+            try:
+                fund, note = krx_fundamental()
+                notes.append(f"KRX실적={len(fund)}종목{note}")
+            except Exception as e:
+                notes.append(f"KRX실적=예외:{type(e).__name__}:{str(e)[:50]}")
+        else:
+            notes.append("KRX실적=건너뜀(KRX_FUND=0)")
         fwd, fnote = load_consensus_kr()
         notes.append(f"컨센서스={fnote}")
         if not fund:      # KRX 가 막히면 커밋해 둔 EPS·BPS 로 주가에서 직접 계산
             fund, bnote = load_fundamental_file()
             notes.append(f"파일실적={len(fund)}종목({bnote})")
-        if fund and os.getenv("PER_BAND", "1") != "0":
+        if fund and os.getenv("PER_BAND", "1") != "0" and os.getenv("KRX_FUND", "0") != "0":   # PER 이력도 KRX 화면
             try:
                 hist, hnote = krx_per_history()
                 notes.append(f"PER이력={len(hist)}종목{hnote}")
@@ -1520,11 +1536,17 @@ def self_test():
             "D": {"per": 30, "pbr": 4.0, "eps": 133, "bps": 1000, "dvd": 1.0}}
     _orig = globals()["krx_fundamental"]
     globals()["krx_fundamental"] = lambda day=None: (fake, "(테스트)")
-    os.environ["PER_BAND"] = "0"
+    _env = {k: os.environ.get(k) for k in ("PER_BAND", "KRX_FUND")}
+    os.environ.update(PER_BAND="0", KRX_FUND="1")              # 테스트 동안만 — 실제 실행 설정은 되돌린다
     try:
         attach_valuation("kr", rows)
     finally:
         globals()["krx_fundamental"] = _orig
+        for k, v in _env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     assert rows[2]["per"] is None, "적자 종목의 PER 이 남아 있음"
     assert rows[0]["roe"] == 10.0, rows[0]["roe"]
     assert rows[1]["per_vs_sec"] == 100.0, rows[1]["per_vs_sec"]   # 중앙값 20배
