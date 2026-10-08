@@ -17,7 +17,7 @@
 
 투자 권유가 아니며 종목 발굴 보조 자료입니다.
 """
-import json, os, sys, threading, time, traceback
+import json, os, re, sys, threading, time, traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
@@ -340,12 +340,27 @@ def _last(d):
     return pd.Timestamp(d.index[-1]).date()
 
 
+def _kr_intraday():
+    """국내 장이 아직 끝나지 않았는가(평일 15:40 KST 전). 이때 받은 당일 봉은 확정 종가가 아니다."""
+    now = datetime.now(KST)
+    return now.weekday() < 5 and (now.hour, now.minute) < (15, 40)
+
+
+def _is_kr(code):
+    return bool(re.fullmatch(r"\d[0-9A-Z]{5}", code))
+
+
 def fetch_ohlcv(code, tries=3):
     d = _fetch_ohlcv(code, tries)
     if d is None and ("." in code or "/" in code):          # BRK.B → BRK-B (야후 표기)
         d = _fetch_ohlcv(code.replace(".", "-").replace("/", "-"), tries)
-    if code.isdigit() or d is None:
+    if d is None:
         return d
+    if _is_kr(code):
+        # 장중에 돌면 당일 봉은 현재가 — 직전 거래일 종가까지만 쓴다
+        if _kr_intraday() and _last(d) >= datetime.now(KST).date():
+            d = d[pd.to_datetime(d.index).date < datetime.now(KST).date()]
+        return d if not d.empty else None
     exp = _us_expected()                                    # 미국: 마지막 거래일 봉이 빠졌으면 다른 소스로 채운다
     if _last(d) >= exp:
         return d
@@ -1385,6 +1400,8 @@ def run_market(market, uni):
         m["name"] = r["name"]
         m["sector"] = _safe_str(r.get("sector"))
         mc, vl = r.get("mcap"), r.get("value")
+        if market == "kr" and _kr_intraday():
+            vl = np.nan                                     # 리스팅 거래대금은 장중 누적치 — 마지막 확정 봉으로
         rp = r.get("ref_px")
         if pd.notna(mc) and pd.notna(rp) and rp:              # 참조 파일 시총 → 오늘 종가 비율로 맞춘다
             mc = mc * float(d["Close"].iloc[-1]) / float(rp)
@@ -1400,6 +1417,8 @@ def run_market(market, uni):
 
     rows.sort(key=lambda x: (x.get("value") or 0), reverse=True)
     if market == "kr":
+        if _kr_intraday():
+            DIAG["kr_market"] = DIAG.get("kr_market", []) + ["장중 실행 — 당일 미완성 봉 제외, 직전 거래일 종가 기준"]
         DIAG["kr_market"] = DIAG.get("kr_market", []) + [
             f"유니버스: 후보 {len(uni)} → 20일평균거래대금 {MIN_VAL_KR:g}억 미만 {thin} 제외 → {len(rows)}종목"
             f" (직전 {len(PREV_KR)}종목, 유지기준 시총·거래대금 {KEEP_CAP:.0%}·{KEEP_VAL:.0%})"]

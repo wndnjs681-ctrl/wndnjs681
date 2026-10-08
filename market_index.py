@@ -60,6 +60,9 @@ def main():
         if not got:
             print(f"[{key}] 실패"); continue
         d, c, v = got
+        now = datetime.now(KST)
+        if mk == "kr" and now.weekday() < 5 and (now.hour, now.minute) < (15, 40) and d and d[-1] >= now.strftime("%Y-%m-%d"):
+            d, c, v = d[:-1], c[:-1], v[:-1]               # 장중 실행: 당일 봉은 현재가라 뺀다
         out[key] = {"name": name, "mk": mk, "d": d[-400:], "c": c[-400:], "v": v[-400:]}
         print(f"[{key}] {name} {len(d)}일 · 마지막 {d[-1]} {c[-1]:,} · 거래량 0인 날 {sum(1 for x in v[-60:] if not x)}/60")
     if not out:
