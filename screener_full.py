@@ -1378,11 +1378,13 @@ def run_market(market, uni):
 
     # 절반도 못 채운 지표는 스키마에서 뺀다 — 필터를 걸면 전 종목이 사라지기 때문.
     # (미국 종목 리스트에는 시가총액 컬럼이 없는 경우가 있다)
+    # 밸류에이션은 예외: 컨센서스(선행 PER 등)는 애널리스트가 다루는 종목에만 있어 원래 절반을 못 넘는다.
     if rows:
         keep = []
         for s in sch:
             filled = sum(1 for r in rows if r.get(s["key"]) is not None)
-            if s["type"] == "bool" or filled / len(rows) >= 0.5:
+            need = 0.15 if s.get("group") == "밸류에이션" else 0.5
+            if s["type"] == "bool" or filled / len(rows) >= need:
                 keep.append(s)
             else:
                 print(f"[{market}] 스키마에서 제외: {s['label']} (채움률 {filled/len(rows)*100:.0f}%)")
