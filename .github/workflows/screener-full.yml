@@ -22,7 +22,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120          # 미국 재수집(20분 대기 × 최대 2회) 여유
     steps:
       - uses: actions/checkout@v4
 

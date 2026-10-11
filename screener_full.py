@@ -295,7 +295,23 @@ START = (datetime.now(KST) - timedelta(days=LOOKBACK_D)).strftime("%Y-%m-%d")
 NEED = ["Open", "High", "Low", "Close", "Volume"]
 
 
-TAIL = {"behind": 0, "chart": 0, "stooq": 0, "still": 0, "err": {}}
+TAIL = {"behind": 0, "total": 0, "chart": 0, "stooq": 0, "still": 0, "err": {}, "probe": []}
+US_RETRY = int(os.getenv("US_RETRY", "2"))                 # 늦은 종목이 절반 넘으면 미국 재수집 횟수
+US_RETRY_WAIT = float(os.getenv("US_RETRY_WAIT_MIN", "20")) # 재수집 전 대기(분)
+TAIL_PROBE_N = int(os.getenv("TAIL_PROBE_N", "4"))          # 보강 경로 진단: 이 수만큼 마지막 봉을 지우고 되살리는지 시험
+
+
+def _tail_reset():
+    TAIL.update(behind=0, total=0, chart=0, stooq=0, still=0, err={}, probe=[])
+    _TRY.update(chart=0, stooq=0)
+    _OFF.clear()
+
+
+def _probe(msg):
+    with _TAIL_LOCK:
+        if len(TAIL["probe"]) < 12:
+            TAIL["probe"].append(msg)
+    print("  [tail] " + msg, flush=True)
 _TAIL_LOCK = threading.Lock()
 TAIL_TIMEOUT = 5                                            # 보강 요청 타임아웃(초)
 TAIL_PROBE = 15                                             # 경로별 처음 이만큼 시도해 한 번도 못 채우면 그 경로는 끈다
@@ -336,7 +352,8 @@ def tail_diag():
     off = ",".join(sorted(_OFF)) or "없음"
     return (f"마지막봉보강(기준일={_us_expected()}): 늦음={TAIL['behind']} "
             f"차트={TAIL['chart']}/{_TRY['chart']}시도 스투크={TAIL['stooq']}/{_TRY['stooq']}시도 "
-            f"미해결={TAIL['still']} 차단된경로[{off}] 오류[{err}]")
+            f"미해결={TAIL['still']} 차단된경로[{off}] 오류[{err}]"
+            + (" 응답[" + " | ".join(TAIL["probe"][:4]) + "]" if TAIL["probe"] else ""))
 
 
 def _upto(d, day):
@@ -372,6 +389,7 @@ def fetch_ohlcv(code, tries=3):
             d = d[pd.to_datetime(d.index).date < datetime.now(KST).date()]
         return d if not d.empty else None
     exp = _us_expected()                                    # 미국: 마지막 거래일 봉이 빠졌으면 다른 소스로 채운다
+    _tinc("total")
     d = _upto(d, exp)                                       # 장중에 돌면 당일 봉은 현재가 — 마지막 확정 거래일까지만
     if d is None or _last(d) >= exp:
         return d
@@ -404,9 +422,14 @@ def _merge_tail(d, t):
 
 def _stooq_tail(code, d):
     import io, requests
-    sym = code.replace("/", "-").lower() + ".us"
-    t = pd.read_csv(io.StringIO(requests.get("https://stooq.com/q/d/l/", params={"s": sym, "i": "d"},
-                                             timeout=TAIL_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"}).text))
+    sym = code.replace("/", "-").replace(".", "-").lower() + ".us"
+    r = requests.get("https://stooq.com/q/d/l/", params={"s": sym, "i": "d"},
+                     timeout=TAIL_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
+    if TAIL["stooq"] == 0 and _TRY["stooq"] <= 3:
+        _probe(f"stooq {code} http={r.status_code} body={r.text[:90]!r}")
+    t = pd.read_csv(io.StringIO(r.text))
+    if "Date" not in t.columns:
+        raise ValueError("CSV 아님: " + r.text[:40].replace("\n", " "))
     t = t.rename(columns={c: str(c).capitalize() for c in t.columns}).set_index("Date").tail(15)
     return _merge_tail(d, t)
 
@@ -424,10 +447,34 @@ def _yahoo_tail(code, d):
     r.raise_for_status()
     res = r.json()["chart"]["result"][0]
     q = res["indicators"]["quote"][0]
-    off = int(res.get("meta", {}).get("gmtoffset") or -14400)            # 거래소 현지 날짜로
-    idx = (pd.to_datetime(res["timestamp"], unit="s") + pd.Timedelta(seconds=off)).normalize()
-    t = pd.DataFrame({"Open": q["open"], "High": q["high"], "Low": q["low"],
-                      "Close": q["close"], "Volume": q["volume"]}, index=idx)
+    meta = res.get("meta", {})
+    off = int(meta.get("gmtoffset") or -14400)                           # 거래소 현지 날짜로
+    idx = (pd.to_datetime(res.get("timestamp") or [], unit="s") + pd.Timedelta(seconds=off)).normalize()
+    t = pd.DataFrame({"Open": q.get("open"), "High": q.get("high"), "Low": q.get("low"),
+                      "Close": q.get("close"), "Volume": q.get("volume")}, index=idx)
+    # 장 마감 직후엔 당일 봉의 종가가 비어 있고 meta 에만 확정가가 있는 경우가 있다 → meta 로 채운다
+    rmt, rmp = meta.get("regularMarketTime"), meta.get("regularMarketPrice")
+    fixed = ""
+    if rmt and rmp:
+        lt = pd.to_datetime(rmt, unit="s") + pd.Timedelta(seconds=off)
+        day = lt.normalize()
+        if (lt.hour, lt.minute) >= (16, 0):                              # 정규장 마감 후 시각의 가격만
+            bar = dict(Open=rmp, High=meta.get("regularMarketDayHigh") or rmp, Low=meta.get("regularMarketDayLow") or rmp,
+                       Close=rmp, Volume=meta.get("regularMarketVolume") or 0)
+            if day in t.index:
+                row = t.loc[day] if not isinstance(t.loc[day], pd.DataFrame) else t.loc[day].iloc[-1]
+                if pd.isna(row["Close"]):
+                    for k, v in bar.items():
+                        if k == "Close" or pd.isna(row[k]):
+                            t.loc[day, k] = v
+                    fixed = "meta로 당일 종가 채움"
+            else:
+                t.loc[day] = bar
+                fixed = "meta로 당일 봉 추가"
+    if TAIL["chart"] == 0 and _TRY["chart"] <= 4:
+        tail3 = [(str(i.date())[5:], None if pd.isna(c) else round(float(c), 2)) for i, c in zip(t.index[-3:], t["Close"].iloc[-3:])]
+        mt = (pd.to_datetime(rmt, unit="s") + pd.Timedelta(seconds=off)).strftime("%m-%d %H:%M") if rmt else None
+        _probe(f"chart {code} http={r.status_code} bars={len(t)} last3={tail3} meta={mt}/{rmp} base={_last(d)} {fixed}")
     return _merge_tail(d, t)
 
 
@@ -1371,6 +1418,28 @@ def build_series(market, data, rows):
             "count": len(out), "s": out}
 
 
+def probe_tail(codes):
+    """보강 경로 점검: 정상 데이터에서 마지막 봉을 일부러 지우고 야후 차트·Stooq 가 그 날짜를 되살리는지 본다."""
+    out = []
+    for code in codes:
+        d = _fetch_ohlcv(code)
+        if d is None or len(d) < 5:
+            continue
+        cut, gone = d.iloc[:-1], _last(d)
+        for name, fn in (("chart", _yahoo_tail), ("stooq", _stooq_tail)):
+            try:
+                d2 = fn(code, cut)
+                got = _last(d2) if d2 is not None else None
+                c2 = float(d2["Close"].iloc[-1]) if d2 is not None else None
+                out.append(f"{name}:{code} {'OK' if got == gone else '실패'}(지운 {gone} → {got}"
+                           + (f", 종가 {c2:.2f} vs FDR {float(d['Close'].iloc[-1]):.2f}" if got == gone else "") + ")")
+            except Exception as e:
+                out.append(f"{name}:{code} 예외 {type(e).__name__}:{str(e)[:50]}")
+    for o in out:
+        print("  [probe] " + o, flush=True)
+    return out
+
+
 def run_market(market, uni):
     print(f"[{market}] universe = {len(uni):,}")
     data, failed = {}, 0
@@ -1603,7 +1672,30 @@ def main():
                 note += f" → 직전 목록 {len(uni):,}종목으로 진행"
                 print(note, file=sys.stderr)
                 DIAG[mk + "_sector"] = DIAG.get(mk + "_sector", []) + [note]
+            if mk == "us":
+                _tail_reset()
+                probe = probe_tail(list(uni["ticker"][:TAIL_PROBE_N])) if TAIL_PROBE_N > 0 else []
+                _tail_reset()
             payload = run_market(mk, uni)
+            if mk == "us":
+                tries = 0
+                best = (TAIL["behind"], payload, _SERIES)          # 늦은 종목이 가장 적은 실행분을 쓴다
+                while True:
+                    late = TAIL["behind"] / max(1, TAIL["total"])
+                    if late <= 0.5 or tries >= US_RETRY:
+                        break
+                    tries += 1
+                    print(f"[us] 마지막 거래일 봉이 빠진 종목 {TAIL['behind']}/{TAIL['total']} ({late:.0%}) "
+                          f"— {US_RETRY_WAIT:g}분 뒤 재수집 {tries}/{US_RETRY}", flush=True)
+                    time.sleep(US_RETRY_WAIT * 60)
+                    _tail_reset()
+                    p2 = run_market(mk, uni)
+                    if TAIL["behind"] < best[0]:
+                        best = (TAIL["behind"], p2, _SERIES)
+                _, payload, best_series = best
+                globals()["_SERIES"] = best_series
+                payload["diag"] = list(payload["diag"]) + ([f"재수집 {tries}회(늦은 종목 50% 초과)"] if tries else []) \
+                    + ([("보강경로점검: " + " / ".join(probe))[:700]] if probe else [])
             path = f"output/universe_{mk}.json"
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
