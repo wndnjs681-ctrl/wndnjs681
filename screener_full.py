@@ -1350,14 +1350,23 @@ def fnguide_fy(s, code, asof_ym):
     """FnGuide 기업 메인(SVD_Main.asp) Financial Highlight 연간 표에서 추정(E) EPS 와 결산월.
     연결(highlight_D_Y)이 없으면 별도(highlight_B_Y). FY1 = 결산월이 기준월 이후인 첫 추정 연도, FY2 = 그다음 해."""
     from bs4 import BeautifulSoup
-    r = s.get("https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp",
-              params={"pGB": "1", "gicode": "A" + code, "cID": "", "MenuYn": "Y", "ReportGB": "",
-                      "NewMenuID": "101", "stkGb": "701"}, timeout=10)
-    if r.status_code != 200:
-        raise RuntimeError(f"HTTP{r.status_code}")
-    r.encoding = "utf-8"
-    soup = BeautifulSoup(r.text, "lxml")
-    _fn_sample(code, r, soup)
+    soup = None
+    for host in _FN_HOSTS:                                  # 처음 통한 주소를 앞으로 당겨 계속 쓴다
+        r = s.get(host + "/SVO2/ASP/SVD_Main.asp",
+                  params={"pGB": "1", "gicode": "A" + code, "cID": "", "MenuYn": "Y", "ReportGB": "",
+                          "NewMenuID": "101", "stkGb": "701"}, timeout=10,
+                  headers={"Referer": host + "/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A005930"})
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP{r.status_code}")
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "lxml")
+        _fn_sample(code, r, soup)
+        if soup.select_one("#highlight_D_Y") or soup.select_one("#highlight_B_Y"):
+            if host != _FN_HOSTS[0]:
+                with _EST_LOCK:
+                    _FN_HOSTS.remove(host)
+                    _FN_HOSTS.insert(0, host)
+            break
     for sel in ("#highlight_D_Y table", "#highlight_B_Y table"):
         tbl = soup.select_one(sel)
         if not tbl:
@@ -1392,11 +1401,12 @@ def fnguide_fy(s, code, asof_ym):
 
 
 FN_SAMPLE = []
+_FN_HOSTS = ["https://comp.fnguide.com", "http://comp.fnguide.com", "https://asp01.fnguide.com"]
 
 
 def _fn_sample(code, r, soup):
     """처음 2종목의 응답 모양을 diag 에 남긴다 — 표를 못 찾을 때 원인 확인용."""
-    if len(FN_SAMPLE) >= 2:
+    if len(FN_SAMPLE) >= 3:
         return
     hl = soup.select_one("#highlight_D_Y") or soup.select_one("#highlight_B_Y")
     heads = [th.get_text(" ", strip=True)[:14] for th in (hl.select("thead th") if hl else [])][:12]
@@ -1409,7 +1419,10 @@ def _fn_sample(code, r, soup):
                 break
     title = soup.title.get_text(strip=True)[:30] if soup.title else ""
     ids = [x.get("id") for x in soup.select("[id^=highlight]")][:6]
-    FN_SAMPLE.append(f"{code} HTTP{r.status_code} {len(r.text)}B title={title!r} ids={ids} th={heads} {eps}")
+    body = ""
+    if not ids:                                              # 표 없는 작은 응답 — 본문(스크립트 포함) 앞부분
+        body = " body=" + re.sub(r"\s+", " ", r.text)[:420]
+    FN_SAMPLE.append(f"{r.url[:60]} HTTP{r.status_code} {len(r.text)}B title={title!r} ids={ids} th={heads} {eps}{body}")
 
 
 def _fnum(x):
@@ -1427,7 +1440,12 @@ def kr_estimates(codes, asof, workers=4):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                                     "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-                      "Accept-Language": "ko-KR,ko;q=0.9"})
+                      "Accept-Language": "ko-KR,ko;q=0.9",
+                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
+    try:                                                     # 첫 화면을 먼저 열어 세션 쿠키를 받는다
+        s.get("https://comp.fnguide.com/", timeout=10)
+    except Exception as e:
+        _est_note("kr", "fnguide첫화면", e)
     ym = asof[:7]
     out, tried = {}, [0]
     dead = threading.Event()
