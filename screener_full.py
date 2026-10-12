@@ -1158,7 +1158,7 @@ def us_sector_map():
 US_MCAP = {}   # us_sector_map 이 채운다: 티커 → 시총(백만달러)
 
 
-def yahoo_fundamentals(symbols, est=None):
+def yahoo_fundamentals(symbols, est=None, asof=None):
     """Yahoo quote 배치 조회로 미국 종목의 PER·PBR·배당수익률·BPS 를 받는다.
     est 에 dict 를 주면 같은 쿠키·crumb 으로 quoteSummary earningsTrend(올해·내년 추정 EPS)도 받아 채운다."""
     import requests
@@ -1210,7 +1210,7 @@ def yahoo_fundamentals(symbols, est=None):
         time.sleep(0.25)
     notes.insert(0, f"{len(out)}/{len(syms)}종목")
     if est is not None:
-        est.update(yahoo_trend(s, crumb, list(symbols)))
+        est.update(yahoo_trend(s, crumb, list(symbols), asof))
     return out, notes
 
 
@@ -1271,7 +1271,7 @@ def _yv(x):
     return x if np.isfinite(x) else None
 
 
-def _trend_one(s, crumb, sym):
+def _trend_one(s, crumb, sym, asof_ym="0000-00"):
     r = s.get("https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + sym.replace(".", "-"),
               params={"modules": "earningsTrend", "crumb": crumb}, timeout=EST_TIMEOUT)
     if r.status_code == 404:
@@ -1280,18 +1280,26 @@ def _trend_one(s, crumb, sym):
         raise RuntimeError(f"HTTP{r.status_code}")
     res = ((r.json().get("quoteSummary") or {}).get("result") or [None])[0] or {}
     tr = {t.get("period"): t for t in ((res.get("earningsTrend") or {}).get("trend") or [])}
-    out = {}
-    for per, k in (("0y", "fy1"), ("+1y", "fy2")):
+    yrs = []
+    for per in ("0y", "+1y"):
         t = tr.get(per) or {}
-        v = _yv((t.get("earningsEstimate") or {}).get("avg"))
-        if v is not None:
-            out[k] = v
-            if k == "fy1" and t.get("endDate"):
-                out["fy_end"] = str(t["endDate"])[:7]
+        yrs.append((str(t.get("endDate") or "")[:7] or None, _yv((t.get("earningsEstimate") or {}).get("avg"))))
+    # 0y 결산월이 기준월보다 앞이면(회계연도는 끝났는데 실적 발표 전이라 야후가 아직 안 넘긴 경우)
+    # 진행 중인 회계연도는 +1y — FY1 = +1y, FY2 는 야후에 없음
+    if yrs[0][0] and yrs[0][0] < asof_ym:
+        yrs = yrs[1:]
+        _est_note("us", "yahoo", "0y결산지남→+1y를FY1로")
+    out = {}
+    if yrs and yrs[0][1] is not None:
+        out["fy1"] = yrs[0][1]
+        if yrs[0][0]:
+            out["fy_end"] = yrs[0][0]
+        if len(yrs) > 1 and yrs[1][1] is not None:
+            out["fy2"] = yrs[1][1]
     return out
 
 
-def yahoo_trend(s, crumb, symbols, workers=8):
+def yahoo_trend(s, crumb, symbols, asof=None, workers=8):
     """quoteSummary earningsTrend — 0y(올해 회계연도)·+1y(내년) 추정 EPS 와 올해 결산일.
     50종목 배치로 나눠 병렬 조회, 실패 시 1회 재시도, 처음 EST_PROBE 번 모두 실패하면 중단(차단기)."""
     out, tried = {}, [0]
@@ -1304,7 +1312,7 @@ def yahoo_trend(s, crumb, symbols, workers=8):
             try:
                 with _EST_LOCK:
                     tried[0] += 1
-                d = _trend_one(s, crumb, sym)
+                d = _trend_one(s, crumb, sym, (asof or "0000-00")[:7])
                 if d.get("fy1") is not None:
                     with _EST_LOCK:
                         out[sym] = d
@@ -1349,6 +1357,7 @@ def fnguide_fy(s, code, asof_ym):
         raise RuntimeError(f"HTTP{r.status_code}")
     r.encoding = "utf-8"
     soup = BeautifulSoup(r.text, "lxml")
+    _fn_sample(code, r, soup)
     for sel in ("#highlight_D_Y table", "#highlight_B_Y table"):
         tbl = soup.select_one(sel)
         if not tbl:
@@ -1380,6 +1389,27 @@ def fnguide_fy(s, code, asof_ym):
                 d["fy2"] = fut[1][1]
         return d
     raise ValueError("표 없음")
+
+
+FN_SAMPLE = []
+
+
+def _fn_sample(code, r, soup):
+    """처음 2종목의 응답 모양을 diag 에 남긴다 — 표를 못 찾을 때 원인 확인용."""
+    if len(FN_SAMPLE) >= 2:
+        return
+    hl = soup.select_one("#highlight_D_Y") or soup.select_one("#highlight_B_Y")
+    heads = [th.get_text(" ", strip=True)[:14] for th in (hl.select("thead th") if hl else [])][:12]
+    eps = ""
+    if hl:
+        for tr in hl.select("tbody tr"):
+            th = tr.find("th")
+            if th and "EPS" in th.get_text():
+                eps = th.get_text(" ", strip=True)[:12] + ":" + "/".join(td.get_text(strip=True) for td in tr.find_all("td"))[:90]
+                break
+    title = soup.title.get_text(strip=True)[:30] if soup.title else ""
+    ids = [x.get("id") for x in soup.select("[id^=highlight]")][:6]
+    FN_SAMPLE.append(f"{code} HTTP{r.status_code} {len(r.text)}B title={title!r} ids={ids} th={heads} {eps}")
 
 
 def _fnum(x):
@@ -1462,7 +1492,8 @@ def est_diag(mk, rows):
     src = " ".join(f"{k}={v}" for k, v in st.items() if k != "err") or "없음"
     err = ",".join(f"{k}={v}" for k, v in sorted((st.get("err") or {}).items(), key=lambda x: -x[1])[:6]) or "없음"
     return (f"NTM: FY1+FY2 {full}개 / FY1만 {part}개 / 없음 {len(rows) - full - part}개 · "
-            f"출처별 성공[{src}] · 오류[{err}]")
+            f"출처별 성공[{src}] · 오류[{err}]"
+            + (" · FnGuide응답[" + " | ".join(FN_SAMPLE) + "]" if mk == "kr" and FN_SAMPLE else ""))
 
 
 def _read_consensus(name):
@@ -1555,7 +1586,7 @@ def attach_valuation(market, rows, asof=None):
     else:
         try:
             fund, ynotes = yahoo_fundamentals([r["ticker"] for r in rows],
-                                              est if fresh and os.getenv("NTM_EST", "1") != "0" else None)
+                                              est if fresh and os.getenv("NTM_EST", "1") != "0" else None, asof)
             notes.append("Yahoo=" + " ".join(ynotes))
         except Exception as e:
             notes.append(f"Yahoo=예외:{type(e).__name__}:{str(e)[:50]}")
