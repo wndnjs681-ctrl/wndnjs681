@@ -155,6 +155,7 @@ def compute_metrics(df):
     ok = all(np.isfinite(v) for v in got)
     m["ma_align"] = bool(ok and got[0] > got[1] > got[2] > got[3])      # 정배열
     m["ma_align_rev"] = bool(ok and got[0] < got[1] < got[2] < got[3])  # 역배열
+    m["ma_align_s"] = bool(all(np.isfinite(v) for v in got[:3]) and got[0] > got[1] > got[2])  # 단기 정배열
     m["ma_above_cnt"] = int(sum(bool(np.isfinite(v) and px > v) for v in got))
     # 20일선 기울기 (최근 5거래일간 변화율 %)
     if n >= 25:
@@ -232,6 +233,7 @@ SCHEMA = [
     dict(key="pos52",     label="52주 위치",      type="num",  unit="%", group="신고가", better="high", decimals=1),
     # 이동평균
     dict(key="ma_align",     label="정배열(5>20>60>120)", type="bool", unit="",  group="이동평균", better="high"),
+    dict(key="ma_align_s",   label="단기 정배열(5>20>60)", type="bool", unit="", group="이동평균", better="high"),
     dict(key="ma_align_rev", label="역배열",              type="bool", unit="",  group="이동평균", better="low"),
     dict(key="ma_above_cnt", label="이평선 위 개수",      type="num",  unit="개", group="이동평균", better="high", decimals=0),
     dict(key="above_ma5",    label="5일선 위",            type="bool", unit="",  group="이동평균", better="high"),
@@ -1589,6 +1591,7 @@ def self_test():
     up = np.linspace(100, 200, 300)
     m = compute_metrics(F(up))
     assert m["ma_align"] and not m["ma_align_rev"], "우상향인데 정배열이 아님"
+    assert m["ma_align_s"], "우상향인데 단기 정배열이 아님"
     assert m["hi_gap252"] > -1.0, m["hi_gap252"]
     assert m["ma_above_cnt"] == 4 and m["obv_high"]
     assert m["streak_up"] >= 3 and m["rsi14"] > 60
@@ -1603,7 +1606,7 @@ def self_test():
 
     dn = np.linspace(200, 100, 300)
     m2 = compute_metrics(F(dn, dn * 1.01))
-    assert m2["ma_align_rev"] and not m2["ma_align"], "우하향인데 역배열이 아님"
+    assert m2["ma_align_rev"] and not m2["ma_align"] and not m2["ma_align_s"], "우하향인데 역배열이 아님"
     assert m2["hi_gap252"] < -40 and m2["streak_up"] == 0
 
     flat = np.full(300, 100.0) + np.sin(np.arange(300) / 5)
