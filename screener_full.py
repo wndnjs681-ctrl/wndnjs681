@@ -1273,7 +1273,7 @@ def _yv(x):
 
 def _trend_one(s, crumb, sym, asof_ym="0000-00"):
     r = s.get("https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + sym.replace(".", "-"),
-              params={"modules": "earningsTrend", "crumb": crumb}, timeout=EST_TIMEOUT)
+              params={"modules": "earningsTrend,earningsHistory", "crumb": crumb}, timeout=EST_TIMEOUT)
     if r.status_code == 404:
         return {}
     if r.status_code != 200:
@@ -1284,6 +1284,15 @@ def _trend_one(s, crumb, sym, asof_ym="0000-00"):
     for per in ("0y", "+1y"):
         t = tr.get(per) or {}
         yrs.append((str(t.get("endDate") or "")[:7] or None, _yv((t.get("earningsEstimate") or {}).get("avg"))))
+    # 실적이 이미 발표된 분기(earningsHistory)가 0y 결산월 이후까지 있으면, 추정치는 다음 해로 넘어갔는데
+    # endDate 표기만 1년 늦게 남은 것(예: 마이크론 10월 — 0y=176 은 FY27, +1y=206 은 FY28) → 결산월 +12개월
+    done = [_yv(h.get("quarter")) for h in ((res.get("earningsHistory") or {}).get("history") or [])
+            if _yv(h.get("epsActual")) is not None]
+    done = [x for x in done if x]
+    last_q = datetime.fromtimestamp(max(done), timezone.utc).strftime("%Y-%m") if done else None
+    if yrs[0][0] and last_q and last_q >= yrs[0][0]:
+        yrs = [(f"{int(p[:4]) + 1}{p[4:]}" if p else None, v) for p, v in yrs]
+        _est_note("us", "yahoo", "결산월표기1년늦음→보정")
     # 0y 결산월이 기준월보다 앞이면(회계연도는 끝났는데 실적 발표 전이라 야후가 아직 안 넘긴 경우)
     # 진행 중인 회계연도는 +1y — FY1 = +1y, FY2 는 야후에 없음
     if yrs[0][0] and yrs[0][0] < asof_ym:
@@ -2010,6 +2019,20 @@ def self_test():
     assert ntm_eps(100.0, 200.0, "2026-09", "2026-10-12")[:2] == (200.0, 0)    # 결산 지났으면 FY2 전부
     assert ntm_eps(100.0, 200.0, "2028-03", "2026-10-12")[:2] == (100.0, 12)   # 12개월 넘게 남으면 FY1 전부
     assert ntm_eps(None, 200.0, "2026-12", "2026-10-12")[0] is None
+    # 야후 earningsTrend: 0y 결산월 표기가 발표 끝난 분기와 같으면 1년 늦은 표기 → +12개월 / 미발표면 +1y 가 FY1
+    def _fake(hist):
+        js = {"quoteSummary": {"result": [{
+            "earningsTrend": {"trend": [{"period": "0y", "endDate": "2026-08-31", "earningsEstimate": {"avg": {"raw": 176.15}}},
+                                        {"period": "+1y", "endDate": "2027-08-31", "earningsEstimate": {"avg": {"raw": 206.33}}}]},
+            "earningsHistory": {"history": [{"quarter": {"raw": datetime(*q, tzinfo=timezone.utc).timestamp()},
+                                             "epsActual": {"raw": 1.0}} for q in hist]}}]}}
+        R = type("R", (), {"status_code": 200, "json": lambda self: js})
+        return type("S", (), {"get": lambda self, *a, **k: R()})()
+    d = _trend_one(_fake([(2026, 5, 31), (2026, 8, 31)]), "", "MU", "2026-10")
+    assert d == {"fy1": 176.15, "fy2": 206.33, "fy_end": "2027-08"}, d
+    assert abs(ntm_eps(d["fy1"], d["fy2"], d["fy_end"], "2026-10-09")[0] - (11 / 12 * 176.15 + 1 / 12 * 206.33)) < 1e-9
+    assert _trend_one(_fake([(2026, 6, 30)]), "", "AAPL", "2026-10") == {"fy1": 206.33, "fy_end": "2027-08"}
+    EST_STAT.pop("us", None)
     missing = keys - set(m.keys()) - {"mcap", "value"} - VALUATION
     assert not missing, f"SCHEMA 에 있으나 계산되지 않는 지표: {missing}"
     # 밸류에이션 결합 — 적자·결측·업종 대비가 의도대로 처리되는지
@@ -2055,7 +2078,7 @@ def self_test():
     assert rows[1]["fwd_eps"] == 50 and rows[1]["ntm_partial"] and rows[1]["fy2_eps"] is None
     assert rows[2]["fwd_eps"] is None and rows[2]["fwd_per"] is None
 
-    print("self-test OK (10 cases)")
+    print("self-test OK (11 cases)")
 
 
 def main():
