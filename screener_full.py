@@ -265,7 +265,7 @@ SCHEMA = [
     dict(key="atr20",    label="ATR(20)",                       type="num", unit="%", group="변동성", better="none"),
     # 밸류에이션 — 적자 종목은 PER 이 비어 있다(음수 PER 은 해석이 불가능해 제외)
     dict(key="per",        label="PER",                type="num", unit="배", group="밸류에이션", better="low",  decimals=1),
-    dict(key="fwd_per",    label="선행 PER(12M)",      type="num", unit="배", group="밸류에이션", better="low",  decimals=1),
+    dict(key="fwd_per",    label="선행 PER(NTM)",      type="num", unit="배", group="밸류에이션", better="low",  decimals=1),
     dict(key="pbr",        label="PBR",                type="num", unit="배", group="밸류에이션", better="low",  decimals=2),
     dict(key="roe",        label="ROE",                type="num", unit="%",  group="밸류에이션", better="high", decimals=1),
     dict(key="dvd_yld",    label="배당수익률",          type="num", unit="%",  group="밸류에이션", better="high", decimals=2),
@@ -275,7 +275,11 @@ SCHEMA = [
     dict(key="per_pos",    label="52주 PER 밴드 위치",  type="num", unit="%",  group="밸류에이션", better="low",  decimals=1),
     dict(key="eps",        label="EPS",                type="num", unit="",   group="밸류에이션", better="high", decimals=0),
     dict(key="bps",        label="BPS",                type="num", unit="",   group="밸류에이션", better="high", decimals=0),
-    dict(key="fwd_eps",    label="선행 EPS(12M)",      type="num", unit="",   group="밸류에이션", better="high", decimals=0),
+    dict(key="fwd_eps",    label="선행 EPS(NTM)",      type="num", unit="",   group="밸류에이션", better="high", decimals=0),
+    dict(key="fy1_eps",    label="FY1 EPS(추정)",      type="num", unit="",   group="밸류에이션", better="high", decimals=2),
+    dict(key="fy2_eps",    label="FY2 EPS(추정)",      type="num", unit="",   group="밸류에이션", better="high", decimals=2),
+    dict(key="fy_end",     label="FY1 결산월",         type="text", unit="",  group="밸류에이션", better="none"),
+    dict(key="ntm_partial", label="선행 EPS FY1만",    type="bool", unit="",  group="밸류에이션", better="none"),
 ]
 
 
@@ -1154,8 +1158,9 @@ def us_sector_map():
 US_MCAP = {}   # us_sector_map 이 채운다: 티커 → 시총(백만달러)
 
 
-def yahoo_fundamentals(symbols):
-    """Yahoo quote 배치 조회로 미국 종목의 PER·선행PER·PBR·배당수익률·BPS 를 받는다."""
+def yahoo_fundamentals(symbols, est=None):
+    """Yahoo quote 배치 조회로 미국 종목의 PER·PBR·배당수익률·BPS 를 받는다.
+    est 에 dict 를 주면 같은 쿠키·crumb 으로 quoteSummary earningsTrend(올해·내년 추정 EPS)도 받아 채운다."""
     import requests
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1204,7 +1209,260 @@ def yahoo_fundamentals(symbols):
             }
         time.sleep(0.25)
     notes.insert(0, f"{len(out)}/{len(syms)}종목")
+    if est is not None:
+        est.update(yahoo_trend(s, crumb, list(symbols)))
     return out, notes
+
+
+# ══════════════════════════════════════════════════════════════
+# NTM(지금부터 12개월) 선행 EPS — 회계연도 추정치 FY1·FY2 를 남은 개월 수로 가중
+# ══════════════════════════════════════════════════════════════
+EST_TIMEOUT = 5                                         # 추정치 요청 타임아웃(초)
+EST_PROBE = 15                                          # 처음 이만큼 시도해 한 번도 못 받으면 그 출처는 끈다
+_EST_LOCK = threading.Lock()
+_EST_CACHE = {}                                         # 시장별 추정치 — 미국 재수집 때 다시 받지 않는다
+EST_STAT = {}                                           # 시장별 출처 성공 수·오류 종류
+
+
+def _month_end(ym):
+    y, m = int(ym[:4]), int(ym[5:7])
+    nxt = datetime(y + (m == 12), m % 12 + 1, 1)
+    return (nxt - timedelta(days=1)).date()
+
+
+def ntm_eps(fy1, fy2, fy_end, asof):
+    """NTM EPS = FY1 × m/12 + FY2 × (12−m)/12.
+    m = 기준일(asof)부터 FY1 결산월 말까지 남은 개월 수(일수 ÷ 30.44 반올림, 0~12).
+    FY2 가 없으면 FY1 만으로 — partial=True. 반환 (ntm, m, partial)."""
+    if fy1 is None:
+        return None, None, False
+    if isinstance(asof, str):
+        asof = datetime.strptime(asof[:10], "%Y-%m-%d").date()
+    m = None
+    if fy_end:
+        m = int(round((_month_end(fy_end) - asof).days / (365.25 / 12)))
+        m = max(0, min(12, m))
+    if fy2 is None or m is None:
+        return fy1, m, True
+    return fy1 * m / 12 + fy2 * (12 - m) / 12, m, False
+
+
+def _est_note(mk, src, e):
+    key = f"{src}:{type(e).__name__}" if isinstance(e, Exception) else f"{src}:{e}"
+    with _EST_LOCK:
+        err = EST_STAT.setdefault(mk, {}).setdefault("err", {})
+        err[key] = err.get(key, 0) + 1
+
+
+def _est_inc(mk, k):
+    with _EST_LOCK:
+        st = EST_STAT.setdefault(mk, {})
+        st[k] = st.get(k, 0) + 1
+
+
+def _yv(x):
+    """야후 숫자 필드 — {raw, fmt} 또는 숫자."""
+    if isinstance(x, dict):
+        x = x.get("raw")
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return x if np.isfinite(x) else None
+
+
+def _trend_one(s, crumb, sym):
+    r = s.get("https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + sym.replace(".", "-"),
+              params={"modules": "earningsTrend", "crumb": crumb}, timeout=EST_TIMEOUT)
+    if r.status_code == 404:
+        return {}
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP{r.status_code}")
+    res = ((r.json().get("quoteSummary") or {}).get("result") or [None])[0] or {}
+    tr = {t.get("period"): t for t in ((res.get("earningsTrend") or {}).get("trend") or [])}
+    out = {}
+    for per, k in (("0y", "fy1"), ("+1y", "fy2")):
+        t = tr.get(per) or {}
+        v = _yv((t.get("earningsEstimate") or {}).get("avg"))
+        if v is not None:
+            out[k] = v
+            if k == "fy1" and t.get("endDate"):
+                out["fy_end"] = str(t["endDate"])[:7]
+    return out
+
+
+def yahoo_trend(s, crumb, symbols, workers=8):
+    """quoteSummary earningsTrend — 0y(올해 회계연도)·+1y(내년) 추정 EPS 와 올해 결산일.
+    50종목 배치로 나눠 병렬 조회, 실패 시 1회 재시도, 처음 EST_PROBE 번 모두 실패하면 중단(차단기)."""
+    out, tried = {}, [0]
+    dead = threading.Event()
+
+    def one(sym):
+        if dead.is_set():
+            return
+        for k in range(2):
+            try:
+                with _EST_LOCK:
+                    tried[0] += 1
+                d = _trend_one(s, crumb, sym)
+                if d.get("fy1") is not None:
+                    with _EST_LOCK:
+                        out[sym] = d
+                    _est_inc("us", "yahoo")
+                else:
+                    _est_note("us", "yahoo", "추정없음")
+                return
+            except Exception as e:
+                _est_note("us", "yahoo", e)
+                if k == 0:
+                    time.sleep(1.0)
+        with _EST_LOCK:
+            if not out and tried[0] >= EST_PROBE and not dead.is_set():
+                dead.set()
+                print(f"  [us] earningsTrend 차단: 처음 {tried[0]}번 시도에서 한 번도 못 받음", flush=True)
+
+    for i in range(0, len(symbols), 50):
+        if dead.is_set():
+            _est_note("us", "yahoo", f"차단기로 {len(symbols) - i}종목 건너뜀")
+            break
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(one, symbols[i:i + 50]))
+        time.sleep(0.3)
+    return out
+
+
+def _fn_period(h):
+    m = re.search(r"(\d{4})[./](\d{2})", h or "")
+    if not m:
+        return None, False
+    return f"{m.group(1)}-{m.group(2)}", ("(E)" in h or "추정" in h)
+
+
+def fnguide_fy(s, code, asof_ym):
+    """FnGuide 기업 메인(SVD_Main.asp) Financial Highlight 연간 표에서 추정(E) EPS 와 결산월.
+    연결(highlight_D_Y)이 없으면 별도(highlight_B_Y). FY1 = 결산월이 기준월 이후인 첫 추정 연도, FY2 = 그다음 해."""
+    from bs4 import BeautifulSoup
+    r = s.get("https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp",
+              params={"pGB": "1", "gicode": "A" + code, "cID": "", "MenuYn": "Y", "ReportGB": "",
+                      "NewMenuID": "101", "stkGb": "701"}, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP{r.status_code}")
+    r.encoding = "utf-8"
+    soup = BeautifulSoup(r.text, "lxml")
+    for sel in ("#highlight_D_Y table", "#highlight_B_Y table"):
+        tbl = soup.select_one(sel)
+        if not tbl:
+            continue
+        cols = []
+        for tr in tbl.select("thead tr"):
+            c = [_fn_period(th.get_text(" ", strip=True)) for th in tr.find_all("th")]
+            if sum(1 for p, _ in c if p) >= 2:
+                cols = [x for x in c if x[0]]
+        if not cols:
+            continue
+        eps = None
+        for tr in tbl.select("tbody tr"):
+            th = tr.find("th")
+            if th and re.sub(r"\s+", "", th.get_text(" ", strip=True)).startswith("EPS"):
+                tds = tr.find_all("td")[-len(cols):]
+                eps = [_fnum(td.get_text(strip=True)) for td in tds]
+                break
+        if not eps or len(eps) != len(cols):
+            continue
+        fut = [(p, v) for (p, e), v in zip(cols, eps) if e and v is not None and p >= asof_ym]
+        if not fut:
+            return {}
+        d = {"fy1": fut[0][1], "fy_end": fut[0][0]}
+        if len(fut) > 1:
+            y1, m1 = int(fut[0][0][:4]), int(fut[0][0][5:7])
+            y2, m2 = int(fut[1][0][:4]), int(fut[1][0][5:7])
+            if (y2 - y1) * 12 + m2 - m1 == 12:
+                d["fy2"] = fut[1][1]
+        return d
+    raise ValueError("표 없음")
+
+
+def _fnum(x):
+    x = (x or "").replace(",", "").strip()
+    try:
+        v = float(x)
+    except ValueError:
+        return None
+    return v if np.isfinite(v) else None
+
+
+def kr_estimates(codes, asof, workers=4):
+    """국내 FY1·FY2 추정 EPS — FnGuide 실시간 → 실패 종목은 canslim 캐시(output/canslim_kr.json 의 fe)."""
+    import requests
+    s = requests.Session()
+    s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+                      "Accept-Language": "ko-KR,ko;q=0.9"})
+    ym = asof[:7]
+    out, tried = {}, [0]
+    dead = threading.Event()
+
+    def one(code):
+        if dead.is_set():
+            return
+        for k in range(2):
+            try:
+                with _EST_LOCK:
+                    tried[0] += 1
+                d = fnguide_fy(s, code, ym)
+                if d.get("fy1") is not None:
+                    d["src"] = "fnguide"
+                    with _EST_LOCK:
+                        out[code] = d
+                    _est_inc("kr", "fnguide")
+                else:
+                    _est_note("kr", "fnguide", "추정없음")
+                return
+            except Exception as e:
+                _est_note("kr", "fnguide", e)
+                if k == 0:
+                    time.sleep(1.0)
+        with _EST_LOCK:
+            if not out and tried[0] >= EST_PROBE and not dead.is_set():
+                dead.set()
+                print(f"  [kr] FnGuide 차단: 처음 {tried[0]}번 시도에서 한 번도 못 받음", flush=True)
+
+    for i in range(0, len(codes), 50):
+        if dead.is_set():
+            _est_note("kr", "fnguide", f"차단기로 {len(codes) - i}종목 건너뜀")
+            break
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(one, codes[i:i + 50]))
+        if i and i % 400 == 0:
+            print(f"  [kr] FnGuide 추정치 {i}/{len(codes)} … 성공 {len(out)}", flush=True)
+
+    # 보조: canslim 이 WiseReport·FnGuide 에서 받아 둔 연간 추정치
+    try:
+        cs = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", "canslim_kr.json"),
+                            encoding="utf-8")).get("p") or {}
+    except Exception:
+        cs = {}
+    for code in codes:
+        if code in out:
+            continue
+        fe = [(p, v) for p, v in ((cs.get(code) or {}).get("fe") or []) if v is not None and p >= ym]
+        if fe:
+            d = {"fy1": fe[0][1], "fy_end": fe[0][0], "src": "canslim"}
+            if len(fe) > 1 and int(fe[1][0][:4]) - int(fe[0][0][:4]) == 1 and fe[1][0][5:] == fe[0][0][5:]:
+                d["fy2"] = fe[1][1]
+            out[code] = d
+            _est_inc("kr", "canslim")
+    return out
+
+
+def est_diag(mk, rows):
+    full = sum(1 for r in rows if r.get("fwd_eps") is not None and not r.get("ntm_partial"))
+    part = sum(1 for r in rows if r.get("fwd_eps") is not None and r.get("ntm_partial"))
+    st = EST_STAT.get(mk, {})
+    src = " ".join(f"{k}={v}" for k, v in st.items() if k != "err") or "없음"
+    err = ",".join(f"{k}={v}" for k, v in sorted((st.get("err") or {}).items(), key=lambda x: -x[1])[:6]) or "없음"
+    return (f"NTM: FY1+FY2 {full}개 / FY1만 {part}개 / 없음 {len(rows) - full - part}개 · "
+            f"출처별 성공[{src}] · 오류[{err}]")
 
 
 def _read_consensus(name):
@@ -1256,10 +1514,17 @@ def previous_universe(market):
     } for r in rows if r.get("ticker")])
 
 
-def attach_valuation(market, rows):
-    """실적 기반 밸류에이션을 붙인다. 실패해도 나머지 지표는 그대로 살린다."""
+def attach_valuation(market, rows, asof=None):
+    """실적 기반 밸류에이션을 붙인다. 실패해도 나머지 지표는 그대로 살린다.
+    선행 PER·EPS 는 전 종목 NTM(기준일부터 12개월) — FY1·FY2 추정 EPS 를 남은 개월 수로 가중."""
     notes = []
     fund, fwd, hist = {}, {}, {}
+    asof = (asof or datetime.now(KST).strftime("%Y-%m-%d"))[:10]
+    est = _EST_CACHE.get(market)
+    fresh = est is None
+    if fresh:
+        est = {}
+        EST_STAT[market] = {}
 
     if market == "kr":
         # 액션 러너 IP 에서는 KRX 실적 화면이 4변형 모두 400 'LOGOUT' — 기본은 건너뛰고 파일로 간다
@@ -1273,6 +1538,11 @@ def attach_valuation(market, rows):
             notes.append("KRX실적=건너뜀(KRX_FUND=0)")
         fwd, fnote = load_consensus_kr()
         notes.append(f"컨센서스={fnote}")
+        if fresh and os.getenv("NTM_EST", "1") != "0":
+            try:
+                est = kr_estimates([r["ticker"] for r in rows], asof)
+            except Exception as e:
+                _est_note("kr", "fnguide", e)
         if not fund:      # KRX 가 막히면 커밋해 둔 EPS·BPS 로 주가에서 직접 계산
             fund, bnote = load_fundamental_file()
             notes.append(f"파일실적={len(fund)}종목({bnote})")
@@ -1284,10 +1554,14 @@ def attach_valuation(market, rows):
                 notes.append(f"PER이력=예외:{type(e).__name__}:{str(e)[:50]}")
     else:
         try:
-            fund, ynotes = yahoo_fundamentals([r["ticker"] for r in rows])
+            fund, ynotes = yahoo_fundamentals([r["ticker"] for r in rows],
+                                              est if fresh and os.getenv("NTM_EST", "1") != "0" else None)
             notes.append("Yahoo=" + " ".join(ynotes))
         except Exception as e:
             notes.append(f"Yahoo=예외:{type(e).__name__}:{str(e)[:50]}")
+
+    if fresh and est:
+        _EST_CACHE[market] = est
 
     def pick(d, k):
         v = d.get(k)
@@ -1320,17 +1594,21 @@ def attach_valuation(market, rows):
         if market == "us" and pick(f, "mcap") and not r.get("mcap"):
             r["mcap"] = _r(pick(f, "mcap"), 0)
 
-        # 12개월 선행
-        if market == "us":
-            fp, fe = pick(f, "fwd_per"), pick(f, "fwd_eps")
-        else:
-            c = fwd.get(r["ticker"]) or {}
-            fe = pick(c, "fwd_eps")
-            fp = pick(c, "fwd_per")
-            if fp is None and fe and fe > 0 and r.get("price"):
-                fp = r["price"] / fe
-        r["fwd_per"] = _r(fp) if fp and fp > 0 else None
-        r["fwd_eps"] = _r(fe, 0)
+        # NTM 선행 — FY1·FY2 추정치. 국내는 추정치를 못 받으면 컨센서스 파일 값을 FY1 으로(내년은 비움)
+        e = est.get(r["ticker"]) or {}
+        fy1, fy2, fy_end = pick(e, "fy1"), pick(e, "fy2"), e.get("fy_end")
+        if fy1 is None and market == "kr":
+            fy1, fy2, fy_end = pick(fwd.get(r["ticker"]) or {}, "fwd_eps"), None, None
+            if fy1 is not None:
+                _est_inc("kr", "consensus파일")
+        fe, _m, part = ntm_eps(fy1, fy2, fy_end, asof)
+        dec = 0 if market == "kr" else 2
+        r["fy1_eps"], r["fy2_eps"], r["fy_end"] = _r(fy1, dec), _r(fy2, dec), fy_end
+        r["ntm_partial"] = bool(part) if fe is not None else False
+        r["ntm_m"] = _m
+        fp = px / fe if fe and fe > 0 and px else None
+        r["fwd_per"] = _r(fp) if fp and 0 < fp <= 500 else None
+        r["fwd_eps"] = _r(fe, dec)
         # 이익 개선폭: 선행 EPS 가 후행 EPS 대비 얼마나 늘어나는가
         g = (fe / eps - 1) * 100 if fe is not None and eps and eps > 0 else None
         r["eps_growth"] = _r(g) if g is not None and -100 <= g <= 500 else None   # 기저효과로 튀는 값 제외
@@ -1356,6 +1634,7 @@ def attach_valuation(market, rows):
 
     filled = sum(1 for r in rows if r.get("per") is not None)
     notes.append(f"PER채움={filled}/{len(rows)}")
+    notes.append(est_diag(market, rows) + ("" if fresh else " (재수집 — 추정치 재사용)"))
     print(f"[{market}] 밸류에이션: " + " | ".join(notes))
     return notes
 
@@ -1517,8 +1796,16 @@ def run_market(market, uni):
         r["sector"] = k if k and cnt.get(k, 0) >= 3 else ("기타" if k else "미분류")
     print(f"[{market}] 섹터 {len(set(r['sector'] for r in rows))}개")
 
+    asof = END
     try:
-        DIAG[market + "_valuation"] = attach_valuation(market, rows)
+        keep_t = {r["ticker"] for r in rows}
+        ends = [d.index[-1] for t, d in data.items() if t in keep_t and len(d)]
+        if ends:
+            asof = max(ends).strftime("%Y-%m-%d")              # 데이터 기준일 = 마지막 봉 날짜
+    except Exception:
+        pass
+    try:
+        DIAG[market + "_valuation"] = attach_valuation(market, rows, asof)
     except Exception as e:
         traceback.print_exc()
         DIAG[market + "_valuation"] = [f"전체실패:{type(e).__name__}:{str(e)[:80]}"]
@@ -1622,7 +1909,18 @@ def self_test():
                            pd.Series([100, 200, 300, 400, 500.]))) == [0, 200, -100, 300, 300]
     keys = {s["key"] for s in SCHEMA}
     VALUATION = {"per", "fwd_per", "pbr", "roe", "dvd_yld", "eps_growth",
-                 "per_vs_sec", "pbr_vs_sec", "per_pos", "eps", "bps", "fwd_eps"}
+                 "per_vs_sec", "pbr_vs_sec", "per_pos", "eps", "bps", "fwd_eps",
+                 "fy1_eps", "fy2_eps", "fy_end", "ntm_partial"}
+    # NTM EPS — 12월 결산·10월 기준 m=3, 마이크론(8월 결산, FY27 끝 2027-08) m=11
+    v, mm, part = ntm_eps(100.0, 200.0, "2026-12", "2026-10-12")
+    assert mm == 3 and abs(v - (0.25 * 100 + 0.75 * 200)) < 1e-9 and not part, (v, mm)
+    v, mm, part = ntm_eps(120.0, 240.0, "2027-08", "2026-10-12")
+    assert mm == 11 and abs(v - (11 / 12 * 120 + 1 / 12 * 240)) < 1e-9 and not part, (v, mm)
+    v, mm, part = ntm_eps(100.0, None, "2026-12", "2026-10-12")
+    assert v == 100.0 and part and mm == 3
+    assert ntm_eps(100.0, 200.0, "2026-09", "2026-10-12")[:2] == (200.0, 0)    # 결산 지났으면 FY2 전부
+    assert ntm_eps(100.0, 200.0, "2028-03", "2026-10-12")[:2] == (100.0, 12)   # 12개월 넘게 남으면 FY1 전부
+    assert ntm_eps(None, 200.0, "2026-12", "2026-10-12")[0] is None
     missing = keys - set(m.keys()) - {"mcap", "value"} - VALUATION
     assert not missing, f"SCHEMA 에 있으나 계산되지 않는 지표: {missing}"
     # 밸류에이션 결합 — 적자·결측·업종 대비가 의도대로 처리되는지
@@ -1638,12 +1936,19 @@ def self_test():
             "D": {"per": 30, "pbr": 4.0, "eps": 133, "bps": 1000, "dvd": 1.0}}
     _orig = globals()["krx_fundamental"]
     globals()["krx_fundamental"] = lambda day=None: (fake, "(테스트)")
+    _orig_est = globals()["kr_estimates"]
+    globals()["kr_estimates"] = lambda codes, asof: {"A": {"fy1": 80.0, "fy2": 160.0, "fy_end": "2026-12"},
+                                                     "B": {"fy1": 50.0, "fy_end": "2026-12"}}
+    _EST_CACHE.pop("kr", None)
     _env = {k: os.environ.get(k) for k in ("PER_BAND", "KRX_FUND")}
     os.environ.update(PER_BAND="0", KRX_FUND="1")              # 테스트 동안만 — 실제 실행 설정은 되돌린다
     try:
-        attach_valuation("kr", rows)
+        attach_valuation("kr", rows, "2026-10-12")
     finally:
         globals()["krx_fundamental"] = _orig
+        globals()["kr_estimates"] = _orig_est
+        _EST_CACHE.pop("kr", None)
+        EST_STAT.pop("kr", None)
         for k, v in _env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -1655,8 +1960,13 @@ def self_test():
     assert rows[3]["per_vs_sec"] == 150.0, rows[3]["per_vs_sec"]
     assert rows[2]["per_vs_sec"] is None
     assert rows[0]["dvd_yld"] == 2.0 and rows[1]["dvd_yld"] is None
+    # A: m=3 → 0.25×80 + 0.75×160 = 140 → PER 1000/140, 성장률 140/100−1
+    assert rows[0]["fwd_eps"] == 140 and rows[0]["fwd_per"] == round(1000 / 140, 2) and not rows[0]["ntm_partial"]
+    assert rows[0]["eps_growth"] == 40.0 and rows[0]["fy_end"] == "2026-12"
+    assert rows[1]["fwd_eps"] == 50 and rows[1]["ntm_partial"] and rows[1]["fy2_eps"] is None
+    assert rows[2]["fwd_eps"] is None and rows[2]["fwd_per"] is None
 
-    print("self-test OK (9 cases)")
+    print("self-test OK (10 cases)")
 
 
 def main():
