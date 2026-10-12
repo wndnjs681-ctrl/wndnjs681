@@ -1368,36 +1368,69 @@ def fnguide_fy(s, code, asof_ym):
                     _FN_HOSTS.insert(0, host)
             break
     for sel in ("#highlight_D_Y table", "#highlight_B_Y table"):
-        tbl = soup.select_one(sel)
-        if not tbl:
-            continue
-        cols = []
-        for tr in tbl.select("thead tr"):
-            c = [_fn_period(th.get_text(" ", strip=True)) for th in tr.find_all("th")]
-            if sum(1 for p, _ in c if p) >= 2:
-                cols = [x for x in c if x[0]]
-        if not cols:
-            continue
-        eps = None
-        for tr in tbl.select("tbody tr"):
-            th = tr.find("th")
-            if th and re.sub(r"\s+", "", th.get_text(" ", strip=True)).startswith("EPS"):
-                tds = tr.find_all("td")[-len(cols):]
-                eps = [_fnum(td.get_text(strip=True)) for td in tds]
-                break
-        if not eps or len(eps) != len(cols):
-            continue
-        fut = [(p, v) for (p, e), v in zip(cols, eps) if e and v is not None and p >= asof_ym]
-        if not fut:
-            return {}
-        d = {"fy1": fut[0][1], "fy_end": fut[0][0]}
-        if len(fut) > 1:
-            y1, m1 = int(fut[0][0][:4]), int(fut[0][0][5:7])
-            y2, m2 = int(fut[1][0][:4]), int(fut[1][0][5:7])
-            if (y2 - y1) * 12 + m2 - m1 == 12:
-                d["fy2"] = fut[1][1]
-        return d
+        d = _fy_from_table(soup.select_one(sel), asof_ym)
+        if d is not None:
+            return d
     raise ValueError("표 없음")
+
+
+def _fy_from_table(tbl, asof_ym):
+    """연간 재무요약 표 → {fy1, fy2, fy_end}. 표 모양이 아니면 None, 추정 연도가 없으면 {}."""
+    if tbl is None:
+        return None
+    cols = []
+    for tr in tbl.select("thead tr"):
+        c = [_fn_period(th.get_text(" ", strip=True)) for th in tr.find_all("th")]
+        if sum(1 for p, _ in c if p) >= 2:
+            cols = [x for x in c if x[0]]
+    if not cols:
+        return None
+    eps = None
+    for tr in tbl.select("tbody tr"):
+        th = tr.find("th")
+        if th and re.sub(r"\s+", "", th.get_text(" ", strip=True)).startswith("EPS"):
+            tds = tr.find_all("td")[-len(cols):]
+            eps = [_fnum(td.get_text(strip=True)) for td in tds]
+            break
+    if not eps or len(eps) != len(cols):
+        return None
+    fut = [(p, v) for (p, e), v in zip(cols, eps) if e and v is not None and p >= asof_ym]
+    if not fut:
+        return {}
+    d = {"fy1": fut[0][1], "fy_end": fut[0][0]}
+    if len(fut) > 1:
+        y1, m1 = int(fut[0][0][:4]), int(fut[0][0][5:7])
+        y2, m2 = int(fut[1][0][:4]), int(fut[1][0][5:7])
+        if (y2 - y1) * 12 + m2 - m1 == 12:
+            d["fy2"] = fut[1][1]
+    return d
+
+
+def wise_fy(s, code, asof_ym):
+    """WiseReport(네이버 기업정보) 재무요약 연간 표의 추정(E) EPS·결산월 — FnGuide 와 같은 컨센서스."""
+    from bs4 import BeautifulSoup
+    ref = "https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd=" + code
+    page = s.get(ref, timeout=10, headers={"Referer": "https://finance.naver.com/"}).text
+    enc = re.search(r"encparam\s*:\s*['\"]([^'\"]+)", page)
+    cid = re.search(r"\bid\s*:\s*['\"]([^'\"]+)", page)
+    if not enc:
+        raise ValueError("encparam 없음")
+    params = {"cmp_cd": code, "fin_typ": "0", "freq_typ": "Y", "encparam": enc.group(1)}
+    if cid:
+        params["id"] = cid.group(1)
+    r = s.get("https://navercomp.wisereport.co.kr/v2/company/ajax/cF1001.aspx", params=params, timeout=10,
+              headers={"Referer": ref, "X-Requested-With": "XMLHttpRequest"})
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP{r.status_code}")
+    r.encoding = "utf-8"
+    best = None
+    for tbl in BeautifulSoup(r.text, "lxml").select("table"):
+        d = _fy_from_table(tbl, asof_ym)
+        if d is not None and (best is None or (d and not best)):
+            best = d
+    if best is None:
+        raise ValueError("표 없음")
+    return best
 
 
 FN_SAMPLE = []
@@ -1447,42 +1480,49 @@ def kr_estimates(codes, asof, workers=4):
     except Exception as e:
         _est_note("kr", "fnguide첫화면", e)
     ym = asof[:7]
-    out, tried = {}, [0]
-    dead = threading.Event()
+    out = {}
 
-    def one(code):
-        if dead.is_set():
-            return
-        for k in range(2):
-            try:
-                with _EST_LOCK:
-                    tried[0] += 1
-                d = fnguide_fy(s, code, ym)
-                if d.get("fy1") is not None:
-                    d["src"] = "fnguide"
-                    with _EST_LOCK:
-                        out[code] = d
-                    _est_inc("kr", "fnguide")
-                else:
-                    _est_note("kr", "fnguide", "추정없음")
+    def run(name, fn, todo):
+        """출처 하나로 todo 종목을 50개 배치 병렬 조회 — 1회 재시도, 처음 EST_PROBE 번 모두 실패하면 중단."""
+        got, tried, dead = [0], [0], threading.Event()
+
+        def one(code):
+            if dead.is_set():
                 return
-            except Exception as e:
-                _est_note("kr", "fnguide", e)
-                if k == 0:
-                    time.sleep(1.0)
-        with _EST_LOCK:
-            if not out and tried[0] >= EST_PROBE and not dead.is_set():
-                dead.set()
-                print(f"  [kr] FnGuide 차단: 처음 {tried[0]}번 시도에서 한 번도 못 받음", flush=True)
+            for k in range(2):
+                try:
+                    with _EST_LOCK:
+                        tried[0] += 1
+                    d = fn(s, code, ym)
+                    if d.get("fy1") is not None:
+                        d["src"] = name
+                        with _EST_LOCK:
+                            out[code] = d
+                            got[0] += 1
+                        _est_inc("kr", name)
+                    else:
+                        _est_note("kr", name, "추정없음")
+                    return
+                except Exception as e:
+                    _est_note("kr", name, e)
+                    if k == 0:
+                        time.sleep(1.0)
+            with _EST_LOCK:
+                if not got[0] and tried[0] >= EST_PROBE and not dead.is_set():
+                    dead.set()
+                    print(f"  [kr] {name} 차단: 처음 {tried[0]}번 시도에서 한 번도 못 받음", flush=True)
 
-    for i in range(0, len(codes), 50):
-        if dead.is_set():
-            _est_note("kr", "fnguide", f"차단기로 {len(codes) - i}종목 건너뜀")
-            break
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            list(ex.map(one, codes[i:i + 50]))
-        if i and i % 400 == 0:
-            print(f"  [kr] FnGuide 추정치 {i}/{len(codes)} … 성공 {len(out)}", flush=True)
+        for i in range(0, len(todo), 50):
+            if dead.is_set():
+                _est_note("kr", name, f"차단기로 {len(todo) - i}종목 건너뜀")
+                break
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                list(ex.map(one, todo[i:i + 50]))
+            if i and i % 400 == 0:
+                print(f"  [kr] {name} 추정치 {i}/{len(todo)} … 성공 {got[0]}", flush=True)
+
+    run("fnguide", fnguide_fy, list(codes))
+    run("wisereport", wise_fy, [c for c in codes if c not in out])     # FnGuide 가 막히면(액션 IP) 같은 컨센서스를 WiseReport 로
 
     # 보조: canslim 이 WiseReport·FnGuide 에서 받아 둔 연간 추정치
     try:
