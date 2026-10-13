@@ -2117,8 +2117,9 @@ def main():
                     p2 = run_market(mk, uni)
                     if TAIL["behind"] < best[0]:
                         best = (TAIL["behind"], p2, _SERIES)
-                _, payload, best_series = best
+                behind, payload, best_series = best
                 globals()["_SERIES"] = best_series
+                payload["late_ratio"] = round(behind / max(1, TAIL["total"]), 3)   # schedule_gate.py 가 재수집 여부 판단
                 payload["diag"] = list(payload["diag"]) + ([f"재수집 {tries}회(늦은 종목 50% 초과)"] if tries else []) \
                     + ([("보강경로점검: " + " / ".join(probe))[:700]] if probe else [])
             path = f"output/universe_{mk}.json"

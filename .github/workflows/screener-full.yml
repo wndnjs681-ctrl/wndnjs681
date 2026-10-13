@@ -2,10 +2,17 @@ name: screener-full
 
 on:
   schedule:
-    # 국내 장 마감 후 — 매 평일 16:40 KST (07:40 UTC)
+    # GitHub 예약은 이 저장소에서 3~9시간씩 늦거나 빠진다. 그래서 시각에 기대지 않는다:
+    #  - 미리 시작해 미국 장 마감(16:10 ET)까지 기다렸다 수집하는 예약 3개(04·10·16시 UTC, 늦게 떠도 마감 전이면 기다림)
+    #  - 마감 뒤 매시 확인 예약(이미 최신이면 1분 안에 끝남)
+    #  - 국내 장 마감 후 16:40 KST
+    # 어떤 예약이든 build 잡이 schedule_gate.py check 로 '지수의 마지막 마감 거래일 > 보유 데이터 날짜' 인 시장만 수집한다.
     - cron: "40 7 * * 1-5"
-    # 미국 장 마감 후 — 매 화~토 06:10 KST (21:10 UTC 월~금). 미국만 돌려 빨리 끝낸다(07:00 동기화 전 완료)
-    - cron: "10 21 * * 1-5"
+    - cron: "17 4 * * 1-5"
+    - cron: "17 10 * * 1-5"
+    - cron: "17 16 * * 1-5"
+    - cron: "27 20-23 * * 1-5"
+    - cron: "27 0-9 * * 2-6"
   workflow_dispatch:
     inputs:
       markets:
@@ -15,29 +22,66 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: screener-full
-  cancel-in-progress: false
-
 jobs:
-  build:
+  # 미국 장 마감 전이면 마감까지 잔다 — 잡당 최대 6시간이라 세 번 이어 붙여 최대 17시간 반
+  wait1:
+    if: github.event_name == 'schedule' && github.event.schedule != '40 7 * * 1-5'   # 국내 예약은 기다리지 않는다
     runs-on: ubuntu-latest
-    timeout-minutes: 120          # 미국 재수집(20분 대기 × 최대 2회) 여유
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
+      - run: python3 schedule_gate.py wait
+  wait2:
+    needs: wait1
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 schedule_gate.py wait
+  wait3:
+    needs: wait2
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 schedule_gate.py wait
+
+  build:
+    needs: wait3
+    if: always() && needs.wait3.result != 'failure' && needs.wait3.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120          # 미국 재수집(20분 대기 × 최대 2회) 여유
+    concurrency:                  # 수집은 한 번에 하나 — 기다리는 동안 다른 실행이 먼저 끝냈으면 gate 가 건너뛴다
+      group: screener-full
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main               # 몇 시간 기다린 실행도 최신 산출물을 보고 판단·커밋한다
+
+      - name: Gate (수집할 시장)
+        id: gate
+        env:
+          INPUT_MARKETS: ${{ github.event.inputs.markets }}
+        run: |
+          if [ -n "$INPUT_MARKETS" ]; then echo "markets=$INPUT_MARKETS" >> "$GITHUB_OUTPUT"; echo "수동 실행: $INPUT_MARKETS";
+          else python3 schedule_gate.py check; fi
 
       - uses: actions/setup-python@v5
+        if: steps.gate.outputs.markets != ''
         with:
           python-version: "3.11"
 
       - name: Install deps
+        if: steps.gate.outputs.markets != ''
         run: pip install --quiet finance-datareader pandas numpy lxml requests beautifulsoup4
 
       - name: Run screener
+        if: steps.gate.outputs.markets != ''
         env:
           PYTHONUNBUFFERED: "1"
           KRX_FUND: "0"            # KRX 실적 화면은 액션 IP 에서 400 'LOGOUT' — 커밋된 컨센서스 파일로 계산
-          MARKETS: ${{ github.event.inputs.markets || (github.event.schedule == '10 21 * * 1-5' && 'us' || 'kr,us') }}
+          MARKETS: ${{ steps.gate.outputs.markets }}
           MIN_CAP_EOK: "500"
           MIN_VALUE_EOK: "3"
           MIN_CAP_MUSD: "1000"
@@ -49,16 +93,19 @@ jobs:
         run: python screener_full.py
 
       - name: Momentum TOP5 (아침 리포트용)
+        if: steps.gate.outputs.markets != ''
         continue-on-error: true
         env:
-          MARKETS: ${{ github.event.inputs.markets || (github.event.schedule == '10 21 * * 1-5' && 'us' || 'kr,us') }}
+          MARKETS: ${{ steps.gate.outputs.markets }}
         run: python daily_top5.py
 
       - name: Market index (오닐 시장 방향)
+        if: steps.gate.outputs.markets != ''
         continue-on-error: true
         run: python market_index.py
 
       - name: Commit output
+        if: steps.gate.outputs.markets != ''
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
