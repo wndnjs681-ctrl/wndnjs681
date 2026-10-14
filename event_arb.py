@@ -617,9 +617,9 @@ def parse_tender(text):
            "settle": None, "delist": False, "all_or_none": False, "conf": 0}
 
     # 가격: '공개매수가격' 근처의 'nn,nnn원'
-    for pat in (r"공개\s*매수\s*가격[^\n]{0,80}?([\d,]{3,})\s*원",
-                r"매수\s*가격[^\n]{0,60}?보통주[^\n]{0,40}?([\d,]{3,})\s*원",
-                r"주당\s*([\d,]{3,})\s*원"):
+    for pat in (r"(?:1주당|주당)\s*(?:공개\s*매수\s*가격\s*)?[:：]?\s*(?:금\s*)?([\d,]{3,})\s*원",
+                r"공개\s*매수\s*가격[^\n]{0,80}?(?<![\d,])([\d,]{3,11})\s*원",
+                r"매수\s*가격[^\n]{0,60}?보통주[^\n]{0,40}?(?<![\d,])([\d,]{3,11})\s*원"):
         m = _grab(pat, t)
         if m:
             out["price"] = float(m.group(1).replace(",", ""))
@@ -710,6 +710,12 @@ def build_tenders(rows, listing):
             {"label": "결제일", "date": terms.get("settle")},
         ) if d["date"]]
         tl = leg("target", latest.get("corp_name"), code, listing, bddd)
+        # 가격 sanity check: 현재가의 0.5~3배 밖이면 금액(총액 등)을 가격으로 잘못 읽은 것
+        ref = tl.get("last") or tl.get("unaffected")
+        if terms.get("price") and ref and not (0.5 <= terms["price"] / ref <= 3):
+            log(f"공개매수가 이상치 제외 {latest.get('corp_name')}: {terms['price']:,.0f} (현재가 {ref:,.0f})")
+            terms["price_raw"], terms["price"] = terms["price"], None
+            terms["conf"] = sum(1 for k3 in ("price", "qty", "start", "end") if terms.get(k3))
         events.append({
             "type": "TENDER",
             "title": f"{latest.get('corp_name')} 공개매수 — {bidder}",
