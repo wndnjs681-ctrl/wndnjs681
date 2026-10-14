@@ -264,6 +264,14 @@ def parse_ratio(text, left_name=None, right_name=None):
     return a, b, order
 
 
+def is_yes(v):
+    """'예', '해당', 'Y' 는 참. '해당사항없음', '미해당', '아니오', '-' 는 거짓."""
+    t = re.sub(r"\s+", "", str(v or ""))
+    if not t or re.search(r"해당사항없|해당없|미해당|아니|부|N$|^-$", t):
+        return False
+    return bool(re.match(r"(예|해당|Y|O)", t, re.I))
+
+
 def absorber_from_method(text):
     """'A가 B를 흡수합병' → (A, B). 못 찾으면 None."""
     t = re.sub(r"\s+", " ", str(text or ""))
@@ -476,7 +484,7 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
 
     legs, ratio = [], None
     flags = {
-        "bypass_listing": "해당" in str(rec.get("bdlst_atn") or "") and "미해당" not in str(rec.get("bdlst_atn") or ""),
+        "bypass_listing": is_yes(rec.get("bdlst_atn")),
         "put_option": str(rec.get("popt_ctr_atn") or "").strip().startswith(("예", "Y", "해당")),
         "spac": "스팩" in (me_name or "") or "기업인수목적" in (me_name or "") or "스팩" in other_name,
         "external_eval": str(rec.get("exevl_atn") or "").strip().startswith(("예", "Y", "해당", "여")),
@@ -547,8 +555,13 @@ def build_struct_event(kind, rec, lrow, listing, name_idx):
     # 매수청구권 — 공시된 매수예정가격 + 법정 산식 추정치
     appraisal = []
     plan_txt = str(rec.get("aprskh_plnprc") or "")
-    no_right_txt = " ".join(str(rec.get(k) or "") for k in ("mg_stn", "aprskh_plnprc", "aprskh_lmt", "aprskh_pym_plpd_mth", "extr_stn", "extr_sen"))
-    no_right = bool(re.search(r"소규모\s*(합병|주식교환|분할합병)|간이\s*(합병|주식교환)|해당\s*사항\s*없|해당\s*없|미해당|적용\s*되지\s*않|부여되지\s*않", no_right_txt))
+    # 소규모·간이 여부는 '합병형태' 등에서, '해당사항 없음'은 매수청구 항목에서만 본다
+    # ('합병형태: 해당사항없음'은 소규모·간이가 아니라는 뜻이라 청구권이 있다)
+    form_txt = " ".join(str(rec.get(k) or "") for k in ("mg_stn", "extr_stn", "extr_sen", "mg_mth", "dvmg_mth"))
+    plan_area = " ".join(str(rec.get(k) or "") for k in ("aprskh_plnprc", "aprskh_lmt"))
+    no_right = bool(re.search(r"소규모\s*(합병|주식교환|분할합병)|간이\s*(합병|주식교환)", form_txt)) or (
+        not NUM_RE.search(plan_area.replace("-", " ")) and
+        bool(re.search(r"해당\s*사항\s*없|해당\s*없|미해당|적용\s*되지\s*않|부여되지\s*않|발생하지\s*않", plan_area)))
     flags["no_appraisal"] = no_right
     plan_nums = [float(x.replace(",", "")) for x in NUM_RE.findall(plan_txt)
                  if float(x.replace(",", "")) >= 100]
