@@ -26,6 +26,7 @@ def main(live=False):
             print(f"✔ 미국 현재가: AAPL ({ex}) ${u['price']:,.2f} ({u['chg_pct']:+.2f}%)")
         else:
             print("△ 미국 현재가를 받지 못했습니다 — 해외주식 시세 권한이 없는 계정일 수 있습니다.")
+        cors_check(k)
         if live:
             live_check(k)
         print("모든 점검을 통과했습니다.")
@@ -38,6 +39,29 @@ def main(live=False):
         sys.exit(1)
 
 
+
+
+# ── 브라우저에서 바로 부를 수 있는지 (CORS) ──────────────────
+def cors_check(k):
+    """브라우저 전용 모드 가능 여부: 한투 REST 가 다른 사이트(Origin)의 요청을 허용하는지 본다."""
+    import requests
+    origin = "https://example.com"
+    targets = [("토큰", "POST", "/oauth2/tokenP", "content-type"),
+               ("현재가", "GET", "/uapi/domestic-stock/v1/quotations/inquire-price", "authorization,appkey,appsecret,tr_id,custtype,content-type")]
+    for name, method, path, hdrs in targets:
+        try:
+            r = requests.options(k.base + path, timeout=10, headers={"Origin": origin, "Access-Control-Request-Method": method, "Access-Control-Request-Headers": hdrs})
+            allow = r.headers.get("Access-Control-Allow-Origin")
+            print(f"  CORS {name}: 사전요청 HTTP {r.status_code} · 허용 출처 {allow!r} · 허용 헤더 {r.headers.get('Access-Control-Allow-Headers')!r}")
+        except requests.RequestException as e:
+            print(f"  CORS {name}: 요청 실패 {type(e).__name__}")
+    try:
+        r = requests.get(k.base + "/uapi/domestic-stock/v1/quotations/inquire-price", timeout=10,
+                         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": "005930"},
+                         headers={"Origin": origin, "authorization": "Bearer " + k.token(), "appkey": k.key, "appsecret": k.secret, "tr_id": "FHKST01010100", "custtype": "P"})
+        print(f"  CORS 실제 응답: HTTP {r.status_code} · 허용 출처 {r.headers.get('Access-Control-Allow-Origin')!r}")
+    except requests.RequestException as e:
+        print(f"  CORS 실제 응답: 요청 실패 {type(e).__name__}")
 
 
 # ── 실시간·분봉 점검 (python kis_check.py --live) ──────────────
