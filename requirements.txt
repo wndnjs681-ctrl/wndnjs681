@@ -1,0 +1,9 @@
+# 워크플로(.github/workflows/*.yml)의 pip install 목록을 합친 것 — 로컬·Claude Code 세션용
+finance-datareader
+pandas
+numpy
+pyarrow
+requests
+lxml
+beautifulsoup4
+pykrx
