@@ -29,4 +29,4 @@ jobs:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_ENV: ${{ secrets.KIS_ENV }}
-        run: python kis_check.py && python kis_check.py --live
+        run: python kis_check.py --live

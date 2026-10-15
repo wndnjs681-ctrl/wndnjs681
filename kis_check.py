@@ -9,7 +9,7 @@ import os, sys, traceback
 from kis import KIS, KISError
 
 
-def main():
+def main(live=False):
     key = os.getenv("KIS_APP_KEY", "")
     print(f"환경: {os.getenv('KIS_ENV') or 'real'} · 앱키 길이 {len(key)}자 · 앱시크릿 길이 {len(os.getenv('KIS_APP_SECRET', ''))}자")
     try:
@@ -26,6 +26,8 @@ def main():
             print(f"✔ 미국 현재가: AAPL ({ex}) ${u['price']:,.2f} ({u['chg_pct']:+.2f}%)")
         else:
             print("△ 미국 현재가를 받지 못했습니다 — 해외주식 시세 권한이 없는 계정일 수 있습니다.")
+        if live:
+            live_check(k)
         print("모든 점검을 통과했습니다.")
     except KISError as e:
         print(f"✘ {e}")
@@ -36,15 +38,12 @@ def main():
         sys.exit(1)
 
 
-if __name__ == "__main__" and "--live" not in sys.argv:
-    main()
 
 
 # ── 실시간·분봉 점검 (python kis_check.py --live) ──────────────
-def live_check(seconds=20):
+def live_check(k, seconds=20):
     import asyncio
     from kis import TR_KR, TR_US, stream
-    k = KIS(token_cache=False)
     rows = k.minutes_kr("005930")
     print(f"✔ 국내 당일 1분봉: {len(rows)}개" + (f" ({rows[0]['hm']} ~ {rows[-1]['hm']}, 마지막 종가 {rows[-1]['c']:,.0f})" if rows else ""))
     ak = k.approval_key()
@@ -72,5 +71,5 @@ def live_check(seconds=20):
     print(f"{'✔' if got['n'] else '△'} 실시간 체결 {got['n']}건 수신 ({seconds}초)")
 
 
-if __name__ == "__main__" and "--live" in sys.argv:
-    live_check()
+if __name__ == "__main__":
+    main(live="--live" in sys.argv)
