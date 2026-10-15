@@ -69,7 +69,7 @@ kbd { font: 11px var(--font-num); color: var(--ink-3); border: 1px solid var(--l
 .tb-live { margin-left: auto; font-size: 12px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 6px; }
 .tb-live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
 .tb-live.on::before { background: var(--c3); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c3) 25%, transparent); }
-.tb-live.retry::before { background: var(--c4); }
+.tb-live.retry::before, .tb-live.poll::before { background: var(--c4); }
 .tb-live.error::before { background: var(--c8); }
 
 /* ── 본문 ── */

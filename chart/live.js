@@ -18,7 +18,7 @@
     connect() {
       if (this.es) this.es.close();
       this.es = new EventSource("/api/stream");
-      this.es.onopen = () => { this.state = "on"; this.render(); this.resubscribe(true); };
+      this.es.onopen = () => { this.resubscribe(true); };
       this.es.onerror = () => { this.state = "retry"; this.render(); };
       this.es.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } this.handle(m); };
     },
@@ -29,7 +29,7 @@
     render() {
       const el = document.getElementById("liveStatus"); if (!el) return;
       if (!this.on) { el.textContent = "일봉 데이터 (실시간 꺼짐)"; el.className = "tb-live off"; el.title = "내 PC에서 realtime_server.py 로 열면 한투 실시간 시세가 붙습니다"; return; }
-      const label = { on: "실시간 연결됨", retry: "다시 연결 중…", error: "실시간 오류" }[this.state] || "실시간 준비 중";
+      const label = { on: "실시간 연결됨", poll: "준실시간 (몇 초마다 갱신)", retry: "다시 연결 중…", error: "실시간 오류" }[this.state] || "실시간 준비 중";
       el.textContent = label + (this.env === "paper" ? " · 모의" : ""); el.className = "tb-live " + this.state; el.title = this.msg || label;
     },
     // 차트·비교·관심종목에 있는 국내·미국 종목을 구독 (최대 40개)

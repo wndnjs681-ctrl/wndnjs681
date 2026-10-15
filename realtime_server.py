@@ -12,8 +12,12 @@
   GET  /api/stream              틱 스트림 (Server-Sent Events)
   POST /api/subscribe {ids:[]}  구독할 종목 (kr:005930, us:AAPL … 최대 40개)
   GET  /api/minutes?id=kr:…     국내 당일 1분봉 (한투 REST)
+
+회사망처럼 실시간 포트(21000)가 막혀 있으면 두 번 실패한 뒤 REST 현재가를 몇 초마다 조회하는 방식으로
+저절로 바뀐다. 처음부터 그 방식으로 쓰려면 KIS_POLL=1.
 """
 import asyncio, getpass, json, mimetypes, os, queue, sys, threading, time, webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -208,7 +212,9 @@ class Feed:
 
     async def run(self):
         self.wake = asyncio.Event()
-        delay = 2
+        if os.getenv("KIS_POLL") == "1":
+            return await self.poll()
+        delay, fails, ever = 2, 0, False
         while True:
             try:
                 await self.session()
@@ -216,10 +222,70 @@ class Feed:
                 HUB.set_status("error", str(e)); print("✘", e)
                 delay = 60
             except Exception as e:  # 연결 끊김 등 — 잠시 뒤 다시
+                ever = ever or bool(self.active)
+                fails += 1
+                if not ever and fails >= 2:
+                    # 실시간 포트(21000)가 막힌 망 (회사 등) — REST 현재가 조회로 바꾼다
+                    print(f"△ 한투 실시간 포트에 연결하지 못했습니다 ({type(e).__name__}). 현재가를 몇 초마다 조회하는 방식으로 바꿉니다.")
+                    return await self.poll()
                 HUB.set_status("retry", f"다시 연결하는 중 ({type(e).__name__})")
             self.ws = None
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60)
+
+    # ── 실시간 포트가 막혔을 때: REST 현재가를 돌아가며 조회 ──
+    async def poll(self):
+        from zoneinfo import ZoneInfo
+        NY = ZoneInfo("America/New_York")
+        HUB.set_status("poll", "현재가 조회 방식 — 실시간 포트가 막혀 2초 안팎마다 갱신")
+        last_acc, kr_day, kr_day_at = {}, None, 0
+        while True:
+            t0 = time.time()
+            ids = list(self.want)
+            now_kr = datetime.now(kis.KST)
+            # 국내: 오늘이 개장일인지 1분봉의 영업일자로 30분마다 확인 (휴장일에 가짜 봉이 생기지 않게)
+            if any(i.startswith("kr:") for i in ids) and time.time() - kr_day_at > 1800:
+                try:
+                    j = await self.loop.run_in_executor(None, lambda: self.k.get(
+                        "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice", "FHKST03010200",
+                        {"FID_ETC_CLS_CODE": "", "FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": "005930",
+                         "FID_INPUT_HOUR_1": min(now_kr.strftime("%H%M%S"), "153000"), "FID_PW_DATA_INCU_YN": "N"}))
+                    rows = j.get("output2") or []
+                    kr_day = rows[0].get("stck_bsop_date") if rows else None
+                except KISError:
+                    kr_day = None
+                kr_day_at = time.time()
+            for id_ in ids:
+                mk, code = id_.split(":", 1)
+                try:
+                    if mk == "kr":
+                        hm = now_kr.strftime("%H%M")
+                        if kr_day != now_kr.strftime("%Y%m%d") or not ("0900" <= hm <= "1535"):
+                            continue
+                        q = await self.loop.run_in_executor(None, self.k.price_kr, code)
+                        date, tm = kr_day, datetime.now(kis.KST).strftime("%H%M%S")
+                    else:
+                        ny = datetime.now(NY)
+                        if ny.weekday() >= 5 or not ("0930" <= ny.strftime("%H%M") <= "1600"):
+                            continue
+                        ex = await self.loop.run_in_executor(None, self.target, id_)
+                        if not ex:
+                            continue
+                        q = await self.loop.run_in_executor(None, self.k.price_us, code, ex[1][1:4])
+                        q.update(open=None, high=None, low=None)
+                        date, tm = ny.strftime("%Y%m%d"), ny.strftime("%H%M%S")
+                except KISError as e:
+                    print(f"  {id_} 조회 실패: {e}")
+                    continue
+                if not q.get("price"):
+                    continue
+                acc = q.get("volume") or 0
+                vol = max(0.0, acc - last_acc.get(id_, acc))
+                last_acc[id_] = acc
+                HUB.tick({"id": id_, "date": date, "time": tm, "price": q["price"], "chg_pct": q.get("chg_pct"),
+                          "open": q.get("open"), "high": q.get("high"), "low": q.get("low"), "vol": vol, "acc_vol": acc})
+            period = max(2.0, len(ids) * 0.15)
+            await asyncio.sleep(max(0.5, period - (time.time() - t0)))
 
     def start(self):
         def go():
