@@ -7,3 +7,5 @@ requests
 lxml
 beautifulsoup4
 pykrx
+# 한투 실시간(realtime_server.py, kis-check 워크플로)
+websockets

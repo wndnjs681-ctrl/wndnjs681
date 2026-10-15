@@ -18,7 +18,9 @@ GitHub Actions 가 예약 실행으로 파이썬 스크립트를 돌리고, 결�
 | `event_arb.py` | `event-arb.yml` | `events_kr.json` (DART 공시 기반 이벤트 차익) |
 | `chart_history.py` | `chart-history.yml` | Release `chart-history` 의 parquet + `chart` 브랜치의 차트 팩 |
 | `make_report.py` | (워크플로 없음, 수동) | top5 모닝 리포트 HTML |
-| `chart.html` | (없음, 정적 페이지) | 개인용 차트 화면 — `output/series_*`·`universe_*`·`market_index.json` 을 읽는다. 레포 루트에서 `python3 -m http.server` 후 `/chart.html` |
+| `chart.html` + `chart/*.js` | (없음, 정적 페이지) | 개인용 차트 화면 — `output/series_*`·`universe_*`·`market_index.json` 을 읽는다. 모듈: `util`(데이터·표시) `indicators`(지표) `drawings`(그리기) `chart`(차트 한 칸) `live`(실시간) `app`(화면 전체) |
+| `realtime_server.py` | (없음, 내 PC 전용) | 한투 실시간 체결가를 SSE 로 `chart.html` 에 전달. `.env` 키 사용, 127.0.0.1 에서만 열림. 윈도우는 `실시간차트.bat` |
+| `kis.py` · `kis_check.py` | `kis-check.yml` | 한투 Open API 공용 모듈(토큰·현재가·당일 1분봉·실시간) / Secrets 키 점검 (로그만, 커밋 없음) |
 
 의존 순서: `screener_full.py` → `daily_top5.py` → `make_report.py`.
 
@@ -43,5 +45,11 @@ python3 -m py_compile *.py
 ```
 
 실제 실행은 외부 사이트(네이버·KRX·Yahoo·DART·FnGuide 등)를 대량 호출하고 수십 분 걸리므로
-각 스크립트 상단의 env(예: `screener.py` 의 `MAX_TICKERS`)로 범위를 줄여서 돌린다. 비밀값: `DART_API_KEY`(event_arb), `SEC_UA`(canslim) —
+각 스크립트 상단의 env(예: `screener.py` 의 `MAX_TICKERS`)로 범위를 줄여서 돌린다. 비밀값: `DART_API_KEY`(event_arb), `SEC_UA`(canslim), `KIS_APP_KEY`·`KIS_APP_SECRET`(·`KIS_ENV`)(한투) —
 로컬/세션에는 없으므로 해당 기능은 건너뛰거나 실패할 수 있다.
+
+## 한투 Open API 주의
+
+- 접근 토큰은 **1분에 1번**만 발급된다. 한 실행 안에서는 `KIS` 객체 하나를 재사용한다 (`kis.py` 가 `.kis_token.json` 에 캐시).
+- 실시간 구독은 세션당 41건 제한 — `realtime_server.py` 는 40개까지만 구독한다.
+- `.env`·`.kis_token.json`·`.kis_cache.json` 은 커밋 금지 (.gitignore). 키 값을 로그·출력에 남기지 않는다.

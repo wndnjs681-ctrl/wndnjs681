@@ -3,3 +3,4 @@ __pycache__/
 # 비밀값 — 절대 커밋하지 않는다
 .env
 .kis_token.json
+.kis_cache.json

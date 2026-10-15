@@ -134,6 +134,7 @@ SC.fmtPct = x => (x == null || !isFinite(x) ? "—" : (x > 0 ? "+" : "") + x.toF
 SC.cls = x => (x > 0 ? "up" : x < 0 ? "down" : "flat");
 SC.fmtDate = (t, iv) => {
   const d = new Date(t), y = d.getUTCFullYear(), m = String(d.getUTCMonth() + 1).padStart(2, "0"), dd = String(d.getUTCDate()).padStart(2, "0");
+  if (/^\d+$/.test(iv)) return `${m}.${dd} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
   return iv === "M" ? `${y}.${m}` : `${y}.${m}.${dd}`;
 };
 SC.fmtMoney = (v, mk) => {
