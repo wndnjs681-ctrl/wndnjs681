@@ -18,6 +18,7 @@ GitHub Actions 가 예약 실행으로 파이썬 스크립트를 돌리고, 결�
 | `event_arb.py` | `event-arb.yml` | `events_kr.json` (DART 공시 기반 이벤트 차익) |
 | `chart_history.py` | `chart-history.yml` | Release `chart-history` 의 parquet + `chart` 브랜치의 차트 팩 |
 | `make_report.py` | (워크플로 없음, 수동) | top5 모닝 리포트 HTML |
+| `chart.html` | (없음, 정적 페이지) | 개인용 차트 화면 — `output/series_*`·`universe_*`·`market_index.json` 을 읽는다. 레포 루트에서 `python3 -m http.server` 후 `/chart.html` |
 
 의존 순서: `screener_full.py` → `daily_top5.py` → `make_report.py`.
 
