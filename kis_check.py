@@ -36,5 +36,41 @@ def main():
         sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and "--live" not in sys.argv:
     main()
+
+
+# ── 실시간·분봉 점검 (python kis_check.py --live) ──────────────
+def live_check(seconds=20):
+    import asyncio
+    from kis import TR_KR, TR_US, stream
+    k = KIS(token_cache=False)
+    rows = k.minutes_kr("005930")
+    print(f"✔ 국내 당일 1분봉: {len(rows)}개" + (f" ({rows[0]['hm']} ~ {rows[-1]['hm']}, 마지막 종가 {rows[-1]['c']:,.0f})" if rows else ""))
+    ak = k.approval_key()
+    got = {"n": 0}
+
+    def on_tick(t, f):
+        got["n"] += 1
+        if got["n"] <= 3:
+            print(f"  틱 필드 {len(f)}개 · {t}")
+
+    def on_status(s):
+        print(f"  구독 응답: {s}")
+
+    async def run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(stream(k.ws_url, ak, [(TR_KR, "005930"), (TR_KR, "000660"), (TR_US, "DNASAAPL")], on_tick, on_status, stop))
+        await asyncio.sleep(seconds)
+        stop.set(); task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    asyncio.run(run())
+    print(f"{'✔' if got['n'] else '△'} 실시간 체결 {got['n']}건 수신 ({seconds}초)")
+
+
+if __name__ == "__main__" and "--live" in sys.argv:
+    live_check()

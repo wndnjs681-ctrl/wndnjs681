@@ -199,3 +199,68 @@ def _json(r):
         return r.json()
     except ValueError:
         raise KISError(f"응답을 읽지 못했습니다 (HTTP {r.status_code}): {r.text[:200]}")
+
+
+# ── 실시간 (WebSocket) ────────────────────────────────────────
+# 국내 체결가 H0STCNT0: tr_key = 종목코드 / 미국 체결가 HDFSCNT0: tr_key = "D" + 거래소(NAS·NYS·AMS) + 심볼
+TR_KR, TR_US = "H0STCNT0", "HDFSCNT0"
+
+
+def sub_message(approval_key, tr_id, tr_key, subscribe=True):
+    return json.dumps({"header": {"approval_key": approval_key, "custtype": "P", "tr_type": "1" if subscribe else "2",
+                                  "content-type": "utf-8"},
+                       "body": {"input": {"tr_id": tr_id, "tr_key": tr_key}}})
+
+
+def parse_frame(text):
+    """데이터 프레임 '0|TR|건수|a^b^c...' → [(tr_id, [필드...]), ...]. 제어 메시지(JSON)면 None."""
+    if not text or text[0] not in "01":
+        return None
+    parts = text.split("|", 3)
+    if len(parts) < 4 or parts[0] == "1":      # 1 = 암호화(체결통보) — 시세에는 쓰지 않는다
+        return []
+    tr_id, n = parts[1], max(1, int(parts[2] or 1))
+    f = parts[3].split("^")
+    per = len(f) // n
+    return [(tr_id, f[i * per:(i + 1) * per]) for i in range(n)]
+
+
+def tick_kr(f):
+    """H0STCNT0 한 건 → 공통 틱. 날짜는 한국 시각 오늘."""
+    today = datetime.now(KST).strftime("%Y%m%d")
+    return {"id": "kr:" + f[0], "date": today, "time": f[1], "price": _f(f[2]), "chg_pct": _f(f[5]),
+            "open": _f(f[7]), "high": _f(f[8]), "low": _f(f[9]), "vol": _f(f[12]), "acc_vol": _f(f[13])}
+
+
+def tick_us(f):
+    """HDFSCNT0 한 건 → 공통 틱. 날짜·시각은 현지(뉴욕) 기준."""
+    return {"id": "us:" + f[1], "date": f[3] or f[4], "time": f[5], "price": _f(f[11]), "chg_pct": _f(f[14]),
+            "open": _f(f[8]), "high": _f(f[9]), "low": _f(f[10]), "vol": _f(f[19]), "acc_vol": _f(f[20])}
+
+
+async def stream(ws_url, approval_key, subs, on_tick, on_status=None, stop=None):
+    """subs: [(tr_id, tr_key), ...] 를 구독하고 틱마다 on_tick(dict). PINGPONG 은 그대로 돌려준다."""
+    import websockets   # 내 PC 실시간 서버·점검에서만 필요
+    async with websockets.connect(ws_url, ping_interval=None, max_size=2 ** 20) as ws:
+        for tr, key in subs:
+            await ws.send(sub_message(approval_key, tr, key))
+        while stop is None or not stop.is_set():
+            msg = await ws.recv()
+            frames = parse_frame(msg)
+            if frames is None:
+                try:
+                    j = json.loads(msg)
+                except ValueError:
+                    continue
+                h = j.get("header", {})
+                if h.get("tr_id") == "PINGPONG":
+                    await ws.send(msg)
+                elif on_status:
+                    b = j.get("body", {})
+                    on_status({"tr_id": h.get("tr_id"), "tr_key": h.get("tr_key"), "rt_cd": b.get("rt_cd"), "msg": b.get("msg1")})
+                continue
+            for tr, f in frames:
+                try:
+                    on_tick(tick_kr(f) if tr == TR_KR else tick_us(f) if tr == TR_US else None, f)
+                except (IndexError, ValueError):
+                    continue

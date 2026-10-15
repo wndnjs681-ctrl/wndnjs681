@@ -23,10 +23,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install deps
-        run: pip install --quiet requests
+        run: pip install --quiet requests websockets
       - name: Check KIS API
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_ENV: ${{ secrets.KIS_ENV }}
-        run: python kis_check.py
+        run: python kis_check.py && python kis_check.py --live
