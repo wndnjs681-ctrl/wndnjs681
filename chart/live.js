@@ -10,6 +10,7 @@
         const r = await fetch("/api/status", { cache: "no-store" });
         if (!r.ok) throw new Error();
         const j = await r.json();
+        if (j.setup) this.setup = true;
         if (!j.live) throw new Error();
         this.on = true; this.env = j.env;
       } catch { this.render(); return; }
@@ -28,6 +29,7 @@
     },
     render() {
       const el = document.getElementById("liveStatus"); if (!el) return;
+      if (!this.on && this.setup) { el.replaceChildren(SC.el("a", { href: "/chart/setup.html" }, "실시간: 한투 키 입력하기")); el.className = "tb-live retry"; el.title = ""; return; }
       if (!this.on) { el.textContent = "일봉 데이터 (실시간 꺼짐)"; el.className = "tb-live off"; el.title = "내 PC에서 realtime_server.py 로 열면 한투 실시간 시세가 붙습니다"; return; }
       const label = { on: "실시간 연결됨", poll: "준실시간 (몇 초마다 갱신)", retry: "다시 연결 중…", error: "실시간 오류" }[this.state] || "실시간 준비 중";
       el.textContent = label + (this.env === "paper" ? " · 모의" : ""); el.className = "tb-live " + this.state; el.title = this.msg || label;

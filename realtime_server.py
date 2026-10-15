@@ -5,7 +5,7 @@
 
   python realtime_server.py          → http://localhost:8000/chart.html 이 열린다
 
-처음 실행하면 한투 앱키·앱시크릿을 물어보고 같은 폴더의 .env 에 저장한다 (GitHub 에 올라가지 않음).
+처음 실행하면 브라우저에 키 입력 화면(/chart/setup.html)이 열리고, 입력한 키를 같은 폴더의 .env 에 저장한다 (GitHub 에 올라가지 않음).
 이 프로그램은 내 PC 안에서만 열린다(127.0.0.1). 브라우저 ↔ 서버는 SSE, 서버 ↔ 한투는 WebSocket.
 
   GET  /api/status              실시간 켜짐 여부
@@ -16,7 +16,7 @@
 회사망처럼 실시간 포트(21000)가 막혀 있으면 두 번 실패한 뒤 REST 현재가를 몇 초마다 조회하는 방식으로
 저절로 바뀐다. 처음부터 그 방식으로 쓰려면 KIS_POLL=1.
 """
-import asyncio, getpass, json, mimetypes, os, queue, sys, threading, time, webbrowser
+import asyncio, json, mimetypes, os, queue, sys, threading, time, webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -39,72 +39,37 @@ MAX_SUBS = 40
 CACHE_PATH = os.path.join(HERE, ".kis_cache.json")
 
 
-# ── 처음 실행: 키 입력 받아 .env 저장 ─────────────────────────
+# ── 키 설정: 브라우저 화면(/setup)에서 입력받아 .env 에 저장 ─────
 KEY_LEN, SECRET_LEN = 36, 180   # 한투 앱키·앱시크릿의 보통 길이
+SETUP = {"error": ""}
+FEED_LOCK = threading.Lock()
 
 
 def _clean(s):
-    """붙여넣기에 섞인 공백·줄바꿈·제어문자(Ctrl+V 가 글자로 들어온 것 등)를 뺀다."""
-    return "".join(ch for ch in s if ch.isprintable() and not ch.isspace())
+    """붙여넣기에 섞인 공백·줄바꿈·제어문자를 뺀다."""
+    return "".join(ch for ch in str(s) if ch.isprintable() and not ch.isspace())
 
 
-def ask_keys():
-    print("한국투자증권 Open API 키를 입력합니다.")
-    print("붙여넣기: 마우스 오른쪽 버튼 클릭 (Ctrl+V 가 안 먹으면 이 방법으로). 글자는 화면에 보이지 않는 게 정상입니다.\n")
-    while True:
-        key = _clean(getpass.getpass("앱키(App Key)를 붙여넣고 Enter: "))
-        print(f"  → 입력된 길이 {len(key)}자 (보통 {KEY_LEN}자)")
-        secret = _clean(getpass.getpass("앱시크릿(App Secret)을 붙여넣고 Enter: "))
-        print(f"  → 입력된 길이 {len(secret)}자 (보통 {SECRET_LEN}자)")
-        if len(key) > len(secret):
-            print("  앱키가 앱시크릿보다 깁니다 — 두 칸을 바꿔 넣은 것 같습니다. 다시 입력해 주세요.\n")
-            continue
-        if not key or not secret:
-            print("  비어 있는 칸이 있습니다. 다시 입력해 주세요.\n")
-            continue
-        if (len(key), len(secret)) != (KEY_LEN, SECRET_LEN):
-            yn = input("  길이가 보통과 다릅니다. 그래도 이대로 쓸까요? (y = 예 / Enter = 다시 입력): ").strip().lower()
-            if yn != "y":
-                print()
-                continue
-        break
-    env = input("실전투자면 1, 모의투자면 2 를 입력하고 Enter [1]: ").strip()
-    env = "paper" if env == "2" else "real"
-    kis.save_env(key, secret, env)
-    os.environ.update({"KIS_APP_KEY": key, "KIS_APP_SECRET": secret, "KIS_ENV": env})
-    print(f"\n저장했습니다: {kis.ENV_PATH}\n")
+def try_connect(key, secret, env):
+    client = KIS(app_key=key, app_secret=secret, env=env)
+    client.token()
+    return client
 
 
-def first_run_setup():
-    kis.load_env()
-    if not (os.getenv("KIS_APP_KEY") and os.getenv("KIS_APP_SECRET")):
-        ask_keys()
+def start_feed(client):
+    global FEED
+    FEED = Feed(client)
+    FEED.start()
+    SETUP["error"] = ""
+    print(f"✔ 한투 연결 확인 ({'실전' if client.env == 'real' else '모의'}투자) — 차트에 시세를 보냅니다")
 
 
-def connect_kis():
-    """토큰을 받아 본다. 키가 틀렸다는 답이면 그 자리에서 다시 입력받는다 (최대 3번)."""
-    for attempt in range(3):
-        try:
-            client = KIS()
-            client.token()
-            return client
-        except KISError as e:
-            msg = str(e)
-            print(f"✘ 한투 연결 실패: {msg}")
-            if "1분당 1회" in msg:
-                print("  토큰은 1분에 한 번만 받을 수 있습니다. 1분 기다립니다…")
-                time.sleep(61)
-                continue
-            if any(w in msg for w in ("AppKey", "appkey", "AppSecret", "appsecret", "유효하지")):
-                print("  키가 정확히 들어가지 않은 것 같습니다. 다시 입력해 주세요.\n")
-                for k in ("KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ENV"):
-                    os.environ.pop(k, None)
-                ask_keys()
-                time.sleep(61 if attempt else 0)   # 직전에 토큰 요청을 했다면 1분 제한
-                continue
-            break
-    print("  앱키·앱시크릿과 실전/모의 구분을 확인하세요. KIS Developers 에서 키를 다시 복사해 보세요.")
-    sys.exit(1)
+def friendly(msg):
+    if "1분당 1회" in msg:
+        return "토큰은 1분에 한 번만 받을 수 있습니다. 1분 뒤 다시 눌러 주세요."
+    if any(w in msg for w in ("AppKey", "appkey", "AppSecret", "appsecret", "유효하지")):
+        return f"한투가 키를 받아주지 않았습니다 ({msg}). 앱키·앱시크릿을 KIS Developers 에서 다시 복사하고, 실전/모의 구분을 확인하세요."
+    return msg
 
 
 # ── 브라우저로 보내기 (SSE) ──────────────────────────────────
@@ -369,9 +334,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path in ("/", "/index.html"):
-            self.send_response(302); self.send_header("location", "/chart.html"); self.end_headers(); return
+            return self.redirect("/chart.html" if FEED else "/chart/setup.html")
+        if u.path == "/setup":
+            return self.redirect("/chart/setup.html")
         if u.path == "/api/status":
+            if not FEED:
+                return self._json({"live": False, "setup": True, "error": SETUP["error"], "key_len": KEY_LEN, "secret_len": SECRET_LEN})
             return self._json({"live": True, "env": FEED.k.env, "state": HUB.status["state"], "msg": HUB.status["msg"]})
+        if not FEED and u.path.startswith("/api/"):
+            return self._json({"error": "한투 키를 먼저 입력하세요", "rows": []}, 503)
         if u.path == "/api/minutes":
             id_ = (parse_qs(u.query).get("id") or [""])[0]
             rows = []
@@ -385,18 +356,56 @@ class Handler(BaseHTTPRequestHandler):
             return self.stream()
         return self.static(u.path)
 
+    def redirect(self, to):
+        self.send_response(302); self.send_header("location", to); self.end_headers()
+
+    def same_origin(self):
+        """다른 사이트가 이 서버로 요청을 보내지 못하게: JSON 이고, 출처가 이 PC 의 이 주소일 때만."""
+        o = self.headers.get("Origin")
+        okay_origin = o is None or o in (f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}")
+        return okay_origin and (self.headers.get("content-type") or "").startswith("application/json")
+
     def do_POST(self):
-        if urlparse(self.path).path != "/api/subscribe":
+        path = urlparse(self.path).path
+        if path not in ("/api/subscribe", "/api/setup"):
             return self._json({"error": "not found"}, 404)
+        if not self.same_origin():
+            return self._json({"error": "forbidden"}, 403)
         n = int(self.headers.get("content-length") or 0)
         try:
-            ids = [str(x) for x in json.loads(self.rfile.read(n) or b"{}").get("ids", []) if str(x)[:3] in ("kr:", "us:")]
+            body = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             return self._json({"error": "bad json"}, 400)
+        if path == "/api/setup":
+            return self.save_keys(body)
+        if not FEED:
+            return self._json({"error": "한투 키를 먼저 입력하세요"}, 503)
+        ids = [str(x) for x in body.get("ids", []) if str(x)[:3] in ("kr:", "us:")]
         FEED.set_want(ids)
         return self._json({"ok": True, "count": min(len(ids), MAX_SUBS)})
 
+    def save_keys(self, body):
+        key, secret = _clean(body.get("key", "")), _clean(body.get("secret", ""))
+        env = "paper" if body.get("env") == "paper" else "real"
+        if not key or not secret:
+            return self._json({"ok": False, "error": "앱키와 앱시크릿을 모두 넣어 주세요."})
+        with FEED_LOCK:
+            if FEED:
+                return self._json({"ok": True})
+            try:
+                client = try_connect(key, secret, env)
+            except KISError as e:
+                SETUP["error"] = friendly(str(e))
+                print("✘", SETUP["error"])
+                return self._json({"ok": False, "error": SETUP["error"]})
+            kis.save_env(key, secret, env)
+            print(f"✔ 키를 저장했습니다: {kis.ENV_PATH}")
+            start_feed(client)
+        return self._json({"ok": True})
+
     def stream(self):
+        if not FEED:
+            return self._json({"error": "한투 키를 먼저 입력하세요"}, 503)
         self.send_response(200)
         self.send_header("content-type", "text/event-stream; charset=utf-8")
         self.send_header("cache-control", "no-store")
@@ -437,17 +446,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global FEED
-    first_run_setup()
-    client = connect_kis()
-    print(f"✔ 한투 연결 확인 ({'실전' if client.env == 'real' else '모의'}투자)")
-    FEED = Feed(client)
-    FEED.start()
+    kis.load_env()
     threading.Thread(target=HUB.flush_loop, daemon=True).start()
+    key, secret, env = kis.config()
+    if key and secret:
+        try:
+            start_feed(try_connect(key, secret, env))
+        except KISError as e:
+            SETUP["error"] = friendly(str(e))
+            print("✘", SETUP["error"])
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.daemon_threads = True
-    url = f"http://localhost:{PORT}/chart.html"
-    print(f"✔ 차트 주소: {url}\n  이 창을 닫으면 실시간이 멈춥니다. 끝내려면 Ctrl+C")
+    url = f"http://localhost:{PORT}/" + ("chart.html" if FEED else "chart/setup.html")
+    if not FEED:
+        print("브라우저에 열린 화면에서 한투 앱키·앱시크릿을 붙여넣어 주세요.")
+    print(f"✔ 주소: {url}\n  이 창을 닫으면 실시간이 멈춥니다. 끝내려면 Ctrl+C")
     try:
         webbrowser.open(url)
     except Exception:
