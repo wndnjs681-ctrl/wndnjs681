@@ -40,21 +40,71 @@ CACHE_PATH = os.path.join(HERE, ".kis_cache.json")
 
 
 # ── 처음 실행: 키 입력 받아 .env 저장 ─────────────────────────
-def first_run_setup():
-    kis.load_env()
-    if os.getenv("KIS_APP_KEY") and os.getenv("KIS_APP_SECRET"):
-        return
-    print("한국투자증권 Open API 키를 처음 한 번만 입력합니다. (입력한 글자는 화면에 보이지 않습니다)\n")
-    key = getpass.getpass("앱키(App Key)를 붙여넣고 Enter: ").strip()
-    secret = getpass.getpass("앱시크릿(App Secret)을 붙여넣고 Enter: ").strip()
+KEY_LEN, SECRET_LEN = 36, 180   # 한투 앱키·앱시크릿의 보통 길이
+
+
+def _clean(s):
+    """붙여넣기에 섞인 공백·줄바꿈·제어문자(Ctrl+V 가 글자로 들어온 것 등)를 뺀다."""
+    return "".join(ch for ch in s if ch.isprintable() and not ch.isspace())
+
+
+def ask_keys():
+    print("한국투자증권 Open API 키를 입력합니다.")
+    print("붙여넣기: 마우스 오른쪽 버튼 클릭 (Ctrl+V 가 안 먹으면 이 방법으로). 글자는 화면에 보이지 않는 게 정상입니다.\n")
+    while True:
+        key = _clean(getpass.getpass("앱키(App Key)를 붙여넣고 Enter: "))
+        print(f"  → 입력된 길이 {len(key)}자 (보통 {KEY_LEN}자)")
+        secret = _clean(getpass.getpass("앱시크릿(App Secret)을 붙여넣고 Enter: "))
+        print(f"  → 입력된 길이 {len(secret)}자 (보통 {SECRET_LEN}자)")
+        if len(key) > len(secret):
+            print("  앱키가 앱시크릿보다 깁니다 — 두 칸을 바꿔 넣은 것 같습니다. 다시 입력해 주세요.\n")
+            continue
+        if not key or not secret:
+            print("  비어 있는 칸이 있습니다. 다시 입력해 주세요.\n")
+            continue
+        if (len(key), len(secret)) != (KEY_LEN, SECRET_LEN):
+            yn = input("  길이가 보통과 다릅니다. 그래도 이대로 쓸까요? (y = 예 / Enter = 다시 입력): ").strip().lower()
+            if yn != "y":
+                print()
+                continue
+        break
     env = input("실전투자면 1, 모의투자면 2 를 입력하고 Enter [1]: ").strip()
     env = "paper" if env == "2" else "real"
-    if not key or not secret:
-        print("키가 비어 있어 멈춥니다. 다시 실행해 주세요.")
-        sys.exit(1)
     kis.save_env(key, secret, env)
     os.environ.update({"KIS_APP_KEY": key, "KIS_APP_SECRET": secret, "KIS_ENV": env})
-    print(f"\n저장했습니다: {kis.ENV_PATH}\n다음부터는 묻지 않습니다. 키를 바꾸려면 이 파일을 지우고 다시 실행하세요.\n")
+    print(f"\n저장했습니다: {kis.ENV_PATH}\n")
+
+
+def first_run_setup():
+    kis.load_env()
+    if not (os.getenv("KIS_APP_KEY") and os.getenv("KIS_APP_SECRET")):
+        ask_keys()
+
+
+def connect_kis():
+    """토큰을 받아 본다. 키가 틀렸다는 답이면 그 자리에서 다시 입력받는다 (최대 3번)."""
+    for attempt in range(3):
+        try:
+            client = KIS()
+            client.token()
+            return client
+        except KISError as e:
+            msg = str(e)
+            print(f"✘ 한투 연결 실패: {msg}")
+            if "1분당 1회" in msg:
+                print("  토큰은 1분에 한 번만 받을 수 있습니다. 1분 기다립니다…")
+                time.sleep(61)
+                continue
+            if any(w in msg for w in ("AppKey", "appkey", "AppSecret", "appsecret", "유효하지")):
+                print("  키가 정확히 들어가지 않은 것 같습니다. 다시 입력해 주세요.\n")
+                for k in ("KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ENV"):
+                    os.environ.pop(k, None)
+                ask_keys()
+                time.sleep(61 if attempt else 0)   # 직전에 토큰 요청을 했다면 1분 제한
+                continue
+            break
+    print("  앱키·앱시크릿과 실전/모의 구분을 확인하세요. KIS Developers 에서 키를 다시 복사해 보세요.")
+    sys.exit(1)
 
 
 # ── 브라우저로 보내기 (SSE) ──────────────────────────────────
@@ -389,13 +439,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     global FEED
     first_run_setup()
-    try:
-        client = KIS()
-        client.token()
-    except KISError as e:
-        print(f"✘ 한투 연결 실패: {e}")
-        print("  앱키·앱시크릿과 실전/모의 구분을 확인하세요. 다시 입력하려면 .env 파일을 지우고 다시 실행합니다.")
-        sys.exit(1)
+    client = connect_kis()
     print(f"✔ 한투 연결 확인 ({'실전' if client.env == 'real' else '모의'}투자)")
     FEED = Feed(client)
     FEED.start()
