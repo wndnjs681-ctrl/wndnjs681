@@ -1,0 +1,32 @@
+name: kis-check
+
+# 한투 Open API 키 점검 — Secrets 의 KIS_APP_KEY / KIS_APP_SECRET / (선택) KIS_ENV 로
+# 토큰·실시간 접속키 발급과 현재가 조회를 한 번 해본다. 결과는 로그로만 남기고 커밋하지 않는다.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "kis.py"
+      - "kis_check.py"
+      - ".github/workflows/kis-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet requests websockets
+      - name: Check KIS API
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_ENV: ${{ secrets.KIS_ENV }}
+        run: python kis_check.py --live
