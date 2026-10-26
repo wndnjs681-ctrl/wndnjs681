@@ -3,7 +3,7 @@
 """
 시장 지수·거시 지표 일봉 수집 — 스크리너의 시장 판단 화면(오닐 M·와인스타인 단계·미너비니 추세·리버모어 추세 구조)용.
   미국: 나스닥(^IXIC)·S&P500(^GSPC)·다우·러셀2000·필라델피아 반도체   국내: 코스피·코스닥
-  일본: 니케이225·TOPIX   중화권: 항셍·상하이종합·대만 가권   유럽: DAX·유로스톡스50
+  일본: 니케이225·TOPIX   중화권: 항셍·상하이종합   대만: 가권   유럽: DAX·유로스톡스50
   거시: VIX·미 10년물 금리·달러인덱스·원/달러·엔/달러
 산출물: output/market_index.json
   {"asof": "...", "idx": {"IXIC": {"name":"나스닥","mk":"us","rg":"미국","core":true,"kind":"eq","d":[...],"c":[...],"v":[...]}, ...}}
@@ -32,7 +32,7 @@ IDX = [
     ("TOPIX", ["^TOPX", "998405.T", "1306.T"], "TOPIX", "jp", "일본", "Asia/Tokyo", (15, 35), False, "eq"),
     ("HSI", ["^HSI"], "항셍", "cn", "중화권", "Asia/Hong_Kong", (16, 15), False, "eq"),
     ("SSEC", ["000001.SS"], "상하이종합", "cn", "중화권", "Asia/Shanghai", (15, 5), False, "eq"),
-    ("TWII", ["^TWII"], "대만 가권", "cn", "중화권", "Asia/Taipei", (13, 35), False, "eq"),
+    ("TWII", ["^TWII"], "대만 가권", "tw", "대만", "Asia/Taipei", (13, 35), False, "eq"),
     ("GDAXI", ["^GDAXI"], "DAX", "eu", "유럽", "Europe/Berlin", (17, 40), False, "eq"),
     ("SX5E", ["^STOXX50E"], "유로스톡스50", "eu", "유럽", "Europe/Berlin", (17, 40), False, "eq"),
     ("VIX", ["^VIX"], "VIX(공포지수)", "macro", "거시", NY, (16, 20), False, "vix"),
