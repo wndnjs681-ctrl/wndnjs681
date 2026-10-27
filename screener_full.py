@@ -281,6 +281,7 @@ SCHEMA = [
     dict(key="fy_end",     label="FY1 결산월",         type="text", unit="",  group="밸류에이션", better="none"),
     dict(key="ntm_partial", label="선행 EPS FY1만",    type="bool", unit="",  group="밸류에이션", better="none"),
     # 이벤트 — 미국만(야후 calendarEvents). 국내는 채움률이 낮아 스키마에서 자동으로 빠진다
+    dict(key="is_etf",     label="ETF",                type="bool", unit="",  group="이벤트", better="none"),
     dict(key="earn_days",  label="실적 발표까지(일)",  type="num",  unit="일", group="이벤트", better="none", decimals=0),
     dict(key="earn_date",  label="다음 실적 발표일",   type="text", unit="",  group="이벤트", better="none"),
     dict(key="short_float", label="공매도 잔고(유통 %)", type="num", unit="%", group="이벤트", better="none", decimals=1),
@@ -1043,6 +1044,50 @@ def universe_kr():
           .sort_values("value", ascending=False)
           .head(MAX_KR).reset_index(drop=True))
     return u
+
+
+# 포트폴리오·차트용 ETF — 시총 리스팅에 없어 따로 붙인다(레버리지·인버스·지수·채권·금·달러).
+# 추천·숏 후보·시장 건전도·백테스트에서는 빠진다(is_etf / 시계열 e=1).
+ETF_US = {
+    "SOXL": "Direxion 반도체 3배", "SOXS": "Direxion 반도체 인버스 3배", "TQQQ": "ProShares 나스닥100 3배",
+    "SQQQ": "ProShares 나스닥100 인버스 3배", "UPRO": "ProShares S&P500 3배", "SPXU": "ProShares S&P500 인버스 3배",
+    "TECL": "Direxion 기술주 3배", "TNA": "Direxion 러셀2000 3배", "LABU": "Direxion 바이오 3배",
+    "NVDL": "GraniteShares 엔비디아 2배", "TSLL": "Direxion 테슬라 2배", "CONL": "GraniteShares 코인베이스 2배",
+    "KORU": "Direxion 한국 3배", "UVXY": "ProShares VIX 1.5배",
+    "SPY": "SPDR S&P500", "VOO": "Vanguard S&P500", "QQQ": "Invesco 나스닥100", "IWM": "iShares 러셀2000",
+    "DIA": "SPDR 다우존스", "VTI": "Vanguard 미국 전체", "SMH": "VanEck 반도체", "SOXX": "iShares 반도체",
+    "XLK": "SPDR 기술", "XLE": "SPDR 에너지", "XLF": "SPDR 금융", "ARKK": "ARK 혁신", "SCHD": "Schwab 배당",
+    "JEPI": "JPMorgan 커버드콜", "EWY": "iShares 한국", "TLT": "iShares 미국채 20년+", "TMF": "Direxion 미국채 20년 3배",
+    "IEF": "iShares 미국채 7-10년", "SHY": "iShares 미국채 1-3년", "BIL": "SPDR 미국 단기국채 1-3개월",
+    "SGOV": "iShares 미국 단기국채 0-3개월", "GLD": "SPDR 금", "SLV": "iShares 은", "USO": "US 원유",
+    "IBIT": "iShares 비트코인", "UUP": "Invesco 달러 강세",
+}
+ETF_KR = {
+    "069500": "KODEX 200", "122630": "KODEX 레버리지", "252670": "KODEX 200선물인버스2X", "114800": "KODEX 인버스",
+    "229200": "KODEX 코스닥150", "233740": "KODEX 코스닥150레버리지", "251340": "KODEX 코스닥150선물인버스",
+    "360750": "TIGER 미국S&P500", "133690": "TIGER 미국나스닥100", "381170": "TIGER 미국테크TOP10 INDXX",
+    "379800": "KODEX 미국S&P500TR", "390390": "KODEX 미국반도체MV", "091160": "KODEX 반도체", "305720": "KODEX 2차전지산업",
+    "261240": "KODEX 미국달러선물", "261250": "KODEX 미국달러선물레버리지", "132030": "KODEX 골드선물(H)",
+    "153130": "KODEX 단기채권", "357870": "TIGER CD금리투자KIS(합성)", "423160": "KODEX KOFR금리액티브(합성)",
+    "148070": "KOSEF 국고채10년", "305080": "TIGER 미국채10년선물", "304660": "KODEX 미국채울트라30년선물(H)",
+}
+
+
+def add_etfs(mk, uni):
+    """유니버스에 ETF 를 붙인다(이미 있으면 그대로). ETF_EXTRA 환경변수로 더할 수 있다: 'TICKER:이름,…'"""
+    etf = dict(ETF_US if mk == "us" else ETF_KR)
+    for x in os.getenv("ETF_EXTRA_" + mk.upper(), "").split(","):
+        if ":" in x:
+            t, n = x.split(":", 1)
+            etf[t.strip().upper() if mk == "us" else t.strip().zfill(6)] = n.strip()
+    have = set(uni["ticker"])
+    add = pd.DataFrame([{"ticker": t, "name": n, "mcap": np.nan, "value": np.nan, "sector": "ETF"}
+                        for t, n in etf.items() if t not in have])
+    ETF_SET.update(etf)
+    return pd.concat([uni, add], ignore_index=True) if len(add) else uni
+
+
+ETF_SET = set()
 
 
 def universe_us():
@@ -1896,6 +1941,8 @@ def build_series(market, data, rows):
                 vals.append(enc_delta(x, base) if np.isfinite(x) else "0")
             rec[key] = ",".join(vals)
         rec["k"] = k
+        if t in ETF_SET:
+            rec["e"] = 1                                    # ETF — 화면의 시장 건전도·RS 계산에서 뺀다
         out[t] = rec
     return {"market": market, "dates": dates, "days": SERIES_DAYS, "ohlc_days": OHLC_DAYS,
             "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
@@ -1961,6 +2008,7 @@ def run_market(market, uni):
         if not m:
             continue
         m["ticker"] = r["ticker"]
+        m["is_etf"] = r["ticker"] in ETF_SET
         m["name"] = r["name"]
         m["sector"] = _safe_str(r.get("sector"))
         mc, vl = r.get("mcap"), r.get("value")
@@ -2124,7 +2172,7 @@ def self_test():
     keys = {s["key"] for s in SCHEMA}
     VALUATION = {"per", "fwd_per", "pbr", "roe", "dvd_yld", "eps_growth",
                  "per_vs_sec", "pbr_vs_sec", "per_pos", "eps", "bps", "fwd_eps",
-                 "fy1_eps", "fy2_eps", "fy_end", "ntm_partial", "earn_days", "earn_date", "short_float", "short_dtc"}
+                 "fy1_eps", "fy2_eps", "fy_end", "ntm_partial", "earn_days", "earn_date", "short_float", "short_dtc", "is_etf"}
     # NTM EPS — 12월 결산·10월 기준 m=3, 마이크론(8월 결산, FY27 끝 2027-08) m=11
     v, mm, part = ntm_eps(100.0, 200.0, "2026-12", "2026-10-12")
     assert mm == 3 and abs(v - (0.25 * 100 + 0.75 * 200)) < 1e-9 and not part, (v, mm)
@@ -2226,6 +2274,7 @@ def main():
                 note += f" → 직전 목록 {len(uni):,}종목으로 진행"
                 print(note, file=sys.stderr)
                 DIAG[mk + "_sector"] = DIAG.get(mk + "_sector", []) + [note]
+            uni = add_etfs(mk, uni)
             if mk == "us":
                 _tail_reset()
                 probe = probe_tail(list(uni["ticker"][:TAIL_PROBE_N])) if TAIL_PROBE_N > 0 else []

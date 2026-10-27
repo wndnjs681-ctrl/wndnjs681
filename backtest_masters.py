@@ -81,7 +81,7 @@ def stats(monthly):
 
 def run(mk):
     u = json.load(open(os.path.join(OUT, f"universe_{mk}.json"), encoding="utf-8"))
-    rows = sorted(u["rows"], key=lambda r: -(r.get("value") or 0))[:N_TICK]
+    rows = sorted((r for r in u["rows"] if not r.get("is_etf")), key=lambda r: -(r.get("value") or 0))[:N_TICK]
     codes = [r["ticker"] for r in rows]
     print(f"[{mk}] {len(codes)}종목 {YEARS}년치 받는 중…", flush=True)
     with ThreadPoolExecutor(max_workers=8) as ex:

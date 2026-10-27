@@ -86,7 +86,7 @@ def pick(mk, k=5):
     cands, stats = [], dict(universe=len(u["rows"]), liquid=0, template=0, extended=0)
     for r in u["rows"]:
         f = F.get(r["ticker"])
-        if not f or not r.get("mcap"):
+        if not f or not r.get("mcap") or r.get("is_etf"):
             continue
         if r["mcap"] < L["mcap"] or f["val20"] / L["val_div"] < L["val"]:
             continue
