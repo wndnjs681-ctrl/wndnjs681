@@ -81,6 +81,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           KRX_FUND: "0"            # KRX 실적 화면은 액션 IP 에서 400 'LOGOUT' — 커밋된 컨센서스 파일로 계산
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}   # 국내 실적 발표일 추정(없으면 건너뜀) — opendart.fss.or.kr 무료 발급
           MARKETS: ${{ steps.gate.outputs.markets }}
           MIN_CAP_EOK: "500"
           MIN_VALUE_EOK: "3"

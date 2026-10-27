@@ -1,0 +1,44 @@
+name: backtest
+
+# 대가 점수 검증 — 매주 토요일 07:20 KST(금요일 22:20 UTC) + 수동. 결과는 다음 screener-full 실행 때 universe 파일에 실려 대시보드로 간다.
+on:
+  schedule:
+    - cron: "20 22 * * 5"
+  workflow_dispatch:
+    inputs:
+      markets:
+        description: "시장 (us, kr, 또는 us,kr)"
+        default: "us,kr"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: backtest
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet finance-datareader pandas numpy requests
+      - name: Backtest
+        env:
+          PYTHONUNBUFFERED: "1"
+          MARKETS: ${{ github.event.inputs.markets || 'us,kr' }}
+        run: python backtest_masters.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/backtest_*.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "backtest: $(date -u +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push

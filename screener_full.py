@@ -283,6 +283,8 @@ SCHEMA = [
     # 이벤트 — 미국만(야후 calendarEvents). 국내는 채움률이 낮아 스키마에서 자동으로 빠진다
     dict(key="earn_days",  label="실적 발표까지(일)",  type="num",  unit="일", group="이벤트", better="none", decimals=0),
     dict(key="earn_date",  label="다음 실적 발표일",   type="text", unit="",  group="이벤트", better="none"),
+    dict(key="short_float", label="공매도 잔고(유통 %)", type="num", unit="%", group="이벤트", better="none", decimals=1),
+    dict(key="short_dtc",  label="숏 커버 일수",       type="num",  unit="일", group="이벤트", better="none", decimals=1),
 ]
 
 
@@ -1276,7 +1278,7 @@ def _yv(x):
 
 def _trend_one(s, crumb, sym, asof_ym="0000-00"):
     r = s.get("https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + sym.replace(".", "-"),
-              params={"modules": "earningsTrend,earningsHistory,calendarEvents", "crumb": crumb}, timeout=EST_TIMEOUT)
+              params={"modules": "earningsTrend,earningsHistory,calendarEvents,defaultKeyStatistics", "crumb": crumb}, timeout=EST_TIMEOUT)
     if r.status_code == 404:
         return {}
     if r.status_code != 200:
@@ -1308,6 +1310,13 @@ def _trend_one(s, crumb, sym, asof_ym="0000-00"):
     ed = sorted(d for d in (datetime.fromtimestamp(x, timezone.utc).date() for x in ed if x) if d >= today - timedelta(days=1))
     if ed:
         out["earn"] = ed[0].isoformat()
+    # 공매도 잔고(월 2회 갱신) — 유통주식 대비 %·숏 커버 일수(days to cover). 숏 스퀴즈 위험 판단용
+    ks = res.get("defaultKeyStatistics") or {}
+    si, dtc = _yv(ks.get("shortPercentOfFloat")), _yv(ks.get("shortRatio"))
+    if si is not None:
+        out["si"] = si * 100
+    if dtc is not None:
+        out["dtc"] = dtc
     if yrs and yrs[0][1] is not None:
         out["fy1"] = yrs[0][1]
         if yrs[0][0]:
@@ -1336,9 +1345,10 @@ def yahoo_trend(s, crumb, symbols, asof=None, workers=8):
                         out[sym] = d
                     _est_inc("us", "yahoo")
                 else:
-                    if d.get("earn"):
+                    extra = {k: d[k] for k in ("earn", "si", "dtc") if d.get(k) is not None}
+                    if extra:
                         with _EST_LOCK:
-                            out[sym] = {"earn": d["earn"]}
+                            out[sym] = extra
                     _est_note("us", "yahoo", "추정없음")
                 if d.get("earn"):
                     _est_inc("us", "실적일")
@@ -1566,6 +1576,73 @@ def kr_estimates(codes, asof, workers=4):
     return out
 
 
+DART_KEY = os.getenv("DART_API_KEY", "").strip()
+
+
+def _dart_list(s, bgn, end, page):
+    r = s.get("https://opendart.fss.or.kr/api/list.json", timeout=15,
+              params={"crtfc_key": DART_KEY, "bgn_de": bgn, "end_de": end, "pblntf_ty": "I",
+                      "pblntf_detail_ty": "I002", "page_no": page, "page_count": 100})
+    js = r.json()
+    if js.get("status") not in ("000", "013"):            # 013 = 조회된 데이터 없음
+        raise RuntimeError(f"DART {js.get('status')} {js.get('message', '')[:40]}")
+    return js.get("list") or [], int(js.get("total_page") or 1)
+
+
+def kr_earn_next(hist, asof):
+    """과거 잠정실적 발표일들 → 다음 발표일 추정. 후보 = 각 발표일 +1년, 마지막 발표 +91일 주기 — 그중 가장 가까운 미래."""
+    a = datetime.strptime(asof, "%Y-%m-%d").date()
+    ds = sorted(set(hist))
+    cand = [d.replace(year=d.year + 1) if not (d.month == 2 and d.day == 29) else d + timedelta(days=365) for d in ds]
+    if ds:                                                 # 분기 주기(마지막 발표 +91일)도 후보 — 작년 같은 분기 기록이 없을 때
+        n = ds[-1] + timedelta(days=91)
+        while n <= a:
+            n += timedelta(days=91)
+        cand.append(n)
+    fut = [d for d in cand if d > a]
+    return min(fut) if fut else None
+
+
+def kr_earn_dates(codes, asof):
+    """OpenDART 공정공시(I002) 중 '영업(잠정)실적' 공시일(최근 13개월)로 다음 실적 발표일을 추정한다.
+    DART_API_KEY 가 없으면 건너뛴다(무료 발급: opendart.fss.or.kr). 회사 지정 없이 조회하면 기간이 3개월로 제한돼 나눠 받는다."""
+    if not DART_KEY:
+        EST_STAT.setdefault("kr", {}).setdefault("err", {})["DART:키없음(DART_API_KEY)"] = 1
+        return {}
+    import requests
+    s = requests.Session()
+    a = datetime.strptime(asof, "%Y-%m-%d").date()
+    want, hist = set(codes), {}
+    end = a
+    for _ in range(5):                                      # 3개월 × 5 = 15개월
+        bgn = end - timedelta(days=89)
+        page, tot = 1, 1
+        while page <= tot and page <= 60:
+            try:
+                rows, tot = _dart_list(s, bgn.strftime("%Y%m%d"), end.strftime("%Y%m%d"), page)
+            except Exception as e:
+                _est_note("kr", "DART", e)
+                break
+            for x in rows:
+                nm, sc = str(x.get("report_nm", "")), str(x.get("stock_code", "")).strip()
+                if sc in want and "잠정" in nm and "실적" in nm and "정정" not in nm:
+                    try:
+                        hist.setdefault(sc, []).append(datetime.strptime(x["rcept_dt"], "%Y%m%d").date())
+                    except Exception:
+                        pass
+            page += 1
+            time.sleep(0.1)
+        end = bgn - timedelta(days=1)
+    out = {}
+    for sc, ds in hist.items():
+        n = kr_earn_next(ds, asof)
+        if n:
+            out[sc] = n.isoformat()
+    _est_inc("kr", "DART실적일")
+    EST_STAT["kr"]["DART실적일"] = len(out)
+    return out
+
+
 def est_diag(mk, rows):
     full = sum(1 for r in rows if r.get("fwd_eps") is not None and not r.get("ntm_partial"))
     part = sum(1 for r in rows if r.get("fwd_eps") is not None and r.get("ntm_partial"))
@@ -1632,6 +1709,7 @@ def attach_valuation(market, rows, asof=None):
     notes = []
     fund, fwd, hist = {}, {}, {}
     asof = (asof or datetime.now(KST).strftime("%Y-%m-%d"))[:10]
+    kr_earn = {}
     est = _EST_CACHE.get(market)
     fresh = est is None
     if fresh:
@@ -1655,6 +1733,13 @@ def attach_valuation(market, rows, asof=None):
                 est = kr_estimates([r["ticker"] for r in rows], asof)
             except Exception as e:
                 _est_note("kr", "fnguide", e)
+        try:
+            kr_earn = _EST_CACHE.get("kr_earn")
+            if kr_earn is None:
+                kr_earn = _EST_CACHE["kr_earn"] = kr_earn_dates([r["ticker"] for r in rows], asof)
+        except Exception as e:
+            kr_earn = {}
+            _est_note("kr", "DART", e)
         if not fund:      # KRX 가 막히면 커밋해 둔 EPS·BPS 로 주가에서 직접 계산
             fund, bnote = load_fundamental_file()
             notes.append(f"파일실적={len(fund)}종목({bnote})")
@@ -1718,9 +1803,12 @@ def attach_valuation(market, rows, asof=None):
         r["fy1_eps"], r["fy2_eps"], r["fy_end"] = _r(fy1, dec), _r(fy2, dec), fy_end
         r["ntm_partial"] = bool(part) if fe is not None else False
         r["ntm_m"] = _m
-        ed = e.get("earn")                                   # 다음 실적 발표일(미국)
+        r["short_float"] = _r(pick(e, "si"), 1)               # 공매도 잔고(유통주식 대비 %, 미국)
+        r["short_dtc"] = _r(pick(e, "dtc"), 1)                # 숏 커버 일수
+        ed = e.get("earn") or (kr_earn.get(r["ticker"]) if market == "kr" else None)   # 다음 실적 발표일
         r["earn_date"] = ed
         r["earn_days"] = (datetime.strptime(ed, "%Y-%m-%d").date() - datetime.strptime(asof, "%Y-%m-%d").date()).days if ed else None
+        r["earn_est"] = bool(market == "kr" and ed)           # 국내는 작년 같은 분기 발표일로 추정
         fp = px / fe if fe and fe > 0 and px else None
         r["fwd_per"] = _r(fp) if fp and 0 < fp <= 500 else None
         r["fwd_eps"] = _r(fe, dec)
@@ -1978,7 +2066,18 @@ def run_market(market, uni):
                 + DIAG.get(market + "_market", []) + ([tail_diag()] if market == "us" else []),
         "schema": sch,
         "rows": rows,
+        "bt": _load_bt(market),
     }
+
+
+def _load_bt(market):
+    """backtest_masters.py 결과 요약 — 대시보드가 universe 파일로 함께 받는다(동기화 파일을 늘리지 않게)."""
+    try:
+        b = json.load(open(os.path.join("output", f"backtest_{market}.json"), encoding="utf-8"))
+        b["curve"] = (b.get("curve") or [])[-60:]
+        return b
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2025,7 +2124,7 @@ def self_test():
     keys = {s["key"] for s in SCHEMA}
     VALUATION = {"per", "fwd_per", "pbr", "roe", "dvd_yld", "eps_growth",
                  "per_vs_sec", "pbr_vs_sec", "per_pos", "eps", "bps", "fwd_eps",
-                 "fy1_eps", "fy2_eps", "fy_end", "ntm_partial", "earn_days", "earn_date"}
+                 "fy1_eps", "fy2_eps", "fy_end", "ntm_partial", "earn_days", "earn_date", "short_float", "short_dtc"}
     # NTM EPS — 12월 결산·10월 기준 m=3, 마이크론(8월 결산, FY27 끝 2027-08) m=11
     v, mm, part = ntm_eps(100.0, 200.0, "2026-12", "2026-10-12")
     assert mm == 3 and abs(v - (0.25 * 100 + 0.75 * 200)) < 1e-9 and not part, (v, mm)
@@ -2055,6 +2154,9 @@ def self_test():
     _js["calendarEvents"] = {"earnings": {"earningsDate": [{"raw": int(_nxt.timestamp())}, {"raw": int((_nxt - timedelta(days=60)).timestamp())}]}}
     assert _trend_one(_fe, "", "AAPL", "2026-10")["earn"] == _nxt.date().isoformat()     # 지난 날짜는 버리고 다음 발표일
     EST_STAT.pop("us", None)
+    from datetime import date as _d
+    assert kr_earn_next([_d(2025, 10, 28), _d(2026, 1, 29), _d(2026, 4, 30), _d(2026, 7, 30)], "2026-10-12") == _d(2026, 10, 28)
+    assert kr_earn_next([_d(2026, 7, 30)], "2026-10-12") == _d(2026, 10, 29)                   # 작년 기록 없으면 +91일
     missing = keys - set(m.keys()) - {"mcap", "value"} - VALUATION
     assert not missing, f"SCHEMA 에 있으나 계산되지 않는 지표: {missing}"
     # 밸류에이션 결합 — 적자·결측·업종 대비가 의도대로 처리되는지
