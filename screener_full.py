@@ -2172,7 +2172,9 @@ def self_test():
             "D": {"per": 30, "pbr": 4.0, "eps": 133, "bps": 1000, "dvd": 1.0}}
     _orig = globals()["krx_fundamental"]
     globals()["krx_fundamental"] = lambda day=None: (fake, "(테스트)")
-    _orig_est = globals()["kr_estimates"]
+    _orig_est, _orig_earn = globals()["kr_estimates"], globals()["kr_earn_dates"]
+    globals()["kr_earn_dates"] = lambda codes, asof: {"A": "2026-10-20"}     # 자체 점검은 네트워크를 쓰지 않는다
+    _EST_CACHE.pop("kr_earn", None)
     globals()["kr_estimates"] = lambda codes, asof: {"A": {"fy1": 80.0, "fy2": 160.0, "fy_end": "2026-12"},
                                                      "B": {"fy1": 50.0, "fy_end": "2026-12"}}
     _EST_CACHE.pop("kr", None)
@@ -2183,7 +2185,9 @@ def self_test():
     finally:
         globals()["krx_fundamental"] = _orig
         globals()["kr_estimates"] = _orig_est
+        globals()["kr_earn_dates"] = _orig_earn
         _EST_CACHE.pop("kr", None)
+        _EST_CACHE.pop("kr_earn", None)                     # 본 수집이 점검용 결과를 재사용하지 않게
         EST_STAT.pop("kr", None)
         for k, v in _env.items():
             if v is None:
@@ -2201,6 +2205,7 @@ def self_test():
     assert rows[0]["eps_growth"] == 40.0 and rows[0]["fy_end"] == "2026-12"
     assert rows[1]["fwd_eps"] == 50 and rows[1]["ntm_partial"] and rows[1]["fy2_eps"] is None
     assert rows[2]["fwd_eps"] is None and rows[2]["fwd_per"] is None
+    assert rows[0]["earn_days"] == 8 and rows[0]["earn_est"] and rows[1]["earn_days"] is None   # 국내 실적일(추정) 반영
 
     print("self-test OK (11 cases)")
 
