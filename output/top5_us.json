@@ -1,7 +1,7 @@
 {
  "market": "us",
  "date": "2026-10-26",
- "generated_at": "2026-10-27T14:19:45+09:00",
+ "generated_at": "2026-10-27T14:59:24+09:00",
  "rule": "미너비니 트렌드 템플릿 + RS·고점 근접·3개월 모멘텀·매집·수축 점수, 과열 제외, 섹터당 2종목",
  "stats": {
   "universe": 1198,
@@ -90,7 +90,7 @@
    "rsi14": 68.9,
    "vol_x20": 1.11,
    "bb_gap": 4.96,
-   "per": 36.75,
+   "per": 36.87,
    "fwd_per": 37.9,
    "why": [
     "RS 99",
@@ -103,8 +103,8 @@
   },
   {
    "ticker": "RVTY",
-   "name": "Revvity  Inc.",
-   "sector": "Industrials",
+   "name": "Revvity",
+   "sector": "Health Care",
    "score": 92.1,
    "price": 160.39,
    "chg1d": 1.02,
@@ -133,8 +133,8 @@
   },
   {
    "ticker": "TMO",
-   "name": "Thermo Fisher Scientific",
-   "sector": "Health Care",
+   "name": "Thermo Fisher Scientific Inc.",
+   "sector": "Industrials",
    "score": 90.7,
    "price": 684.89,
    "chg1d": 1.64,
@@ -150,7 +150,7 @@
    "rsi14": 57.8,
    "vol_x20": 0.8,
    "bb_gap": 2.43,
-   "per": 35.54,
+   "per": 36.12,
    "fwd_per": 25.06,
    "why": [
     "RS 84",
@@ -165,8 +165,8 @@
  "next": [
   {
    "ticker": "TMO",
-   "name": "Thermo Fisher Scientific",
-   "sector": "Health Care",
+   "name": "Thermo Fisher Scientific Inc.",
+   "sector": "Industrials",
    "score": 90.7,
    "price": 684.89,
    "chg1d": 1.64,
@@ -182,7 +182,7 @@
    "rsi14": 57.8,
    "vol_x20": 0.8,
    "bb_gap": 2.43,
-   "per": 35.54,
+   "per": 36.12,
    "fwd_per": 25.06,
    "why": [
     "RS 84",
@@ -255,7 +255,7 @@
   },
   {
    "ticker": "EXPD",
-   "name": "Expeditors International of Washington Inc",
+   "name": "Expeditors International",
    "sector": "Industrials",
    "score": 90.2,
    "price": 196.43,
@@ -272,7 +272,7 @@
    "rsi14": 57.8,
    "vol_x20": 0.87,
    "bb_gap": -0.35,
-   "per": 28.55,
+   "per": 28.59,
    "fwd_per": 24.11,
    "why": [
     "RS 89",
@@ -302,7 +302,7 @@
    "rsi14": 57.2,
    "vol_x20": 0.93,
    "bb_gap": 0.89,
-   "per": 29.22,
+   "per": 29.67,
    "fwd_per": 25.28,
    "why": [
     "RS 83",
