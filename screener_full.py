@@ -2084,7 +2084,7 @@ def run_market(market, uni):
         keep = []
         for s in sch:
             filled = sum(1 for r in rows if r.get(s["key"]) is not None)
-            need = 0.15 if s.get("group") == "밸류에이션" else 0.5
+            need = 0.15 if s.get("group") in ("밸류에이션", "이벤트") else 0.5   # 국내 실적일(DART)·공매도는 일부 종목만 있다
             if s["type"] == "bool" or filled / len(rows) >= need:
                 keep.append(s)
             else:
