@@ -280,6 +280,9 @@ SCHEMA = [
     dict(key="fy2_eps",    label="FY2 EPS(추정)",      type="num", unit="",   group="밸류에이션", better="high", decimals=2),
     dict(key="fy_end",     label="FY1 결산월",         type="text", unit="",  group="밸류에이션", better="none"),
     dict(key="ntm_partial", label="선행 EPS FY1만",    type="bool", unit="",  group="밸류에이션", better="none"),
+    # 이벤트 — 미국만(야후 calendarEvents). 국내는 채움률이 낮아 스키마에서 자동으로 빠진다
+    dict(key="earn_days",  label="실적 발표까지(일)",  type="num",  unit="일", group="이벤트", better="none", decimals=0),
+    dict(key="earn_date",  label="다음 실적 발표일",   type="text", unit="",  group="이벤트", better="none"),
 ]
 
 
@@ -1273,7 +1276,7 @@ def _yv(x):
 
 def _trend_one(s, crumb, sym, asof_ym="0000-00"):
     r = s.get("https://query2.finance.yahoo.com/v10/finance/quoteSummary/" + sym.replace(".", "-"),
-              params={"modules": "earningsTrend,earningsHistory", "crumb": crumb}, timeout=EST_TIMEOUT)
+              params={"modules": "earningsTrend,earningsHistory,calendarEvents", "crumb": crumb}, timeout=EST_TIMEOUT)
     if r.status_code == 404:
         return {}
     if r.status_code != 200:
@@ -1299,6 +1302,12 @@ def _trend_one(s, crumb, sym, asof_ym="0000-00"):
         yrs = yrs[1:]
         _est_note("us", "yahoo", "0y결산지남→+1y를FY1로")
     out = {}
+    # 다음 실적 발표일(calendarEvents) — 돌파 매매는 발표일을 끼면 갭 위험. 지난 날짜는 버린다
+    ed = [_yv(x) for x in (((res.get("calendarEvents") or {}).get("earnings") or {}).get("earningsDate") or [])]
+    today = datetime.now(timezone.utc).date()
+    ed = sorted(d for d in (datetime.fromtimestamp(x, timezone.utc).date() for x in ed if x) if d >= today - timedelta(days=1))
+    if ed:
+        out["earn"] = ed[0].isoformat()
     if yrs and yrs[0][1] is not None:
         out["fy1"] = yrs[0][1]
         if yrs[0][0]:
@@ -1327,7 +1336,12 @@ def yahoo_trend(s, crumb, symbols, asof=None, workers=8):
                         out[sym] = d
                     _est_inc("us", "yahoo")
                 else:
+                    if d.get("earn"):
+                        with _EST_LOCK:
+                            out[sym] = {"earn": d["earn"]}
                     _est_note("us", "yahoo", "추정없음")
+                if d.get("earn"):
+                    _est_inc("us", "실적일")
                 return
             except Exception as e:
                 _est_note("us", "yahoo", e)
@@ -1704,6 +1718,9 @@ def attach_valuation(market, rows, asof=None):
         r["fy1_eps"], r["fy2_eps"], r["fy_end"] = _r(fy1, dec), _r(fy2, dec), fy_end
         r["ntm_partial"] = bool(part) if fe is not None else False
         r["ntm_m"] = _m
+        ed = e.get("earn")                                   # 다음 실적 발표일(미국)
+        r["earn_date"] = ed
+        r["earn_days"] = (datetime.strptime(ed, "%Y-%m-%d").date() - datetime.strptime(asof, "%Y-%m-%d").date()).days if ed else None
         fp = px / fe if fe and fe > 0 and px else None
         r["fwd_per"] = _r(fp) if fp and 0 < fp <= 500 else None
         r["fwd_eps"] = _r(fe, dec)
@@ -2008,7 +2025,7 @@ def self_test():
     keys = {s["key"] for s in SCHEMA}
     VALUATION = {"per", "fwd_per", "pbr", "roe", "dvd_yld", "eps_growth",
                  "per_vs_sec", "pbr_vs_sec", "per_pos", "eps", "bps", "fwd_eps",
-                 "fy1_eps", "fy2_eps", "fy_end", "ntm_partial"}
+                 "fy1_eps", "fy2_eps", "fy_end", "ntm_partial", "earn_days", "earn_date"}
     # NTM EPS — 12월 결산·10월 기준 m=3, 마이크론(8월 결산, FY27 끝 2027-08) m=11
     v, mm, part = ntm_eps(100.0, 200.0, "2026-12", "2026-10-12")
     assert mm == 3 and abs(v - (0.25 * 100 + 0.75 * 200)) < 1e-9 and not part, (v, mm)
@@ -2032,6 +2049,11 @@ def self_test():
     assert d == {"fy1": 176.15, "fy2": 206.33, "fy_end": "2027-08"}, d
     assert abs(ntm_eps(d["fy1"], d["fy2"], d["fy_end"], "2026-10-09")[0] - (11 / 12 * 176.15 + 1 / 12 * 206.33)) < 1e-9
     assert _trend_one(_fake([(2026, 6, 30)]), "", "AAPL", "2026-10") == {"fy1": 206.33, "fy_end": "2027-08"}
+    _fe = _fake([(2026, 6, 30)])
+    _nxt = datetime.now(timezone.utc).replace(hour=12) + timedelta(days=9)
+    _js = _fe.get().json()["quoteSummary"]["result"][0]
+    _js["calendarEvents"] = {"earnings": {"earningsDate": [{"raw": int(_nxt.timestamp())}, {"raw": int((_nxt - timedelta(days=60)).timestamp())}]}}
+    assert _trend_one(_fe, "", "AAPL", "2026-10")["earn"] == _nxt.date().isoformat()     # 지난 날짜는 버리고 다음 발표일
     EST_STAT.pop("us", None)
     missing = keys - set(m.keys()) - {"mcap", "value"} - VALUATION
     assert not missing, f"SCHEMA 에 있으나 계산되지 않는 지표: {missing}"
