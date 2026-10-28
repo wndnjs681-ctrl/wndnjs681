@@ -57,6 +57,12 @@ def yahoo(sym, tz):
                 if cl is None:
                     continue
                 m[datetime.fromtimestamp(t, ztz).strftime("%Y-%m-%d")] = (round(cl, 4 if cl < 50 else 2), int(vo or 0))
+            meta = res.get("meta") or {}
+            px, pt = meta.get("regularMarketPrice"), meta.get("regularMarketTime")
+            if px and pt:                                    # 2년치 일봉이 하루 이틀 늦게 붙을 때가 있다 — 마지막 체결가로 메운다
+                md = datetime.fromtimestamp(pt, ztz).strftime("%Y-%m-%d")
+                if m and md > max(m):
+                    m[md] = (round(px, 4 if px < 50 else 2), int(meta.get("regularMarketVolume") or 0))
             if len(m) > 100:                                 # 같은 날짜가 두 번이면 뒤의 값(마감)을 쓴다
                 d = sorted(m)
                 return d, [m[x][0] for x in d], [m[x][1] for x in d]
@@ -88,6 +94,11 @@ def fdr(sym):
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     out = {}
+    p = os.path.join(OUT_DIR, "market_index.json")
+    try:                                                     # 이전 결과 — 이번에 받은 게 더 오래됐으면 지난 마감을 지키려고
+        prev = json.load(open(p, encoding="utf-8")).get("idx", {})
+    except Exception:
+        prev = {}
     for key, syms, name, mk, rg, tz, ready, core, kind in IDX:
         got = used = None
         for sym in syms:
@@ -103,14 +114,24 @@ def main():
         lastok = (now.date() if (now.hour, now.minute) >= ready else now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
         while d and d[-1] > lastok:
             d, c, v = d[:-1], c[:-1], v[:-1]
+        pv = prev.get(key)
+        if pv and pv.get("d") and (not d or pv["d"][-1] > d[-1]):   # 야후가 늦은 데이터를 주면 이전 마감을 이어 붙인다(되돌아가지 않게)
+            pm = {x: (cc, vv) for x, cc, vv in zip(pv["d"], pv["c"], pv.get("v") or [0] * len(pv["d"]))}
+            pm.update({x: (cc, vv) for x, cc, vv in zip(d, c, v)})
+            k = sorted(x for x in pm if x <= lastok)
+            print(f"  [{key}] 받은 데이터가 이전보다 늦음({d[-1] if d else '-'} < {pv['d'][-1]}) — 이전 마감 유지")
+            d, c, v = k, [pm[x][0] for x in k], [pm[x][1] for x in k]
         if not d:
             continue
         out[key] = {"name": name, "mk": mk, "rg": rg, "core": core, "kind": kind, "sym": used,
                     "d": d[-400:], "c": c[-400:], "v": v[-400:]}
         print(f"[{key}] {name}({used}) {len(d)}일 · 마지막 {d[-1]} {c[-1]:,} · 거래량 0인 날 {sum(1 for x in v[-60:] if not x)}/60")
+    for key, pv in prev.items():                             # 이번에 아예 못 받은 지수는 지난 값을 그대로 둔다
+        if key not in out and any(key == x[0] for x in IDX):
+            out[key] = pv
+            print(f"[{key}] 이번엔 못 받음 — 지난 값 유지(마지막 {pv['d'][-1]})")
     if not out:
         sys.exit("지수를 하나도 받지 못했습니다")
-    p = os.path.join(OUT_DIR, "market_index.json")
     json.dump({"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "idx": out},
               open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print(f"→ {p} {os.path.getsize(p):,} bytes")
