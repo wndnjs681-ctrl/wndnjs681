@@ -3,7 +3,7 @@
 """
 screener-full 예약 실행 문지기 — GitHub 예약(cron)이 몇 시간씩 늦거나 빠져도 장 마감 종가를 놓치지 않게 한다.
 
-  python schedule_gate.py wait    미국 장 마감(16:10 ET) 전이면 그때까지 잔다(한 번에 최대 5시간 50분 —
+  python schedule_gate.py wait    미국 장 마감(16:22 ET — VIX 종가 16:15 확정 포함) 전이면 그때까지 잔다(한 번에 최대 5시간 50분 —
                                   잡 제한 6시간이라 워크플로에서 wait 잡을 세 번 이어 붙인다)
   python schedule_gate.py check   지금 수집해야 할 시장을 GITHUB_OUTPUT 의 markets= 로 낸다(없으면 빈 값)
                                   - 미국: SPY 일봉의 마지막 '마감된' 거래일 > output/universe_us.json 의 date,
@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 ET, KST = ZoneInfo("America/New_York"), ZoneInfo("Asia/Seoul")
-US_READY = (16, 10)          # 이 시각(ET) 이후면 당일 봉을 마감 종가로 본다
+US_READY = (16, 22)          # 이 시각(ET) 이후면 당일 봉을 마감 종가로 본다
 KR_READY = (15, 40)          # KST
 MAX_SLEEP = 5 * 3600 + 50 * 60
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
