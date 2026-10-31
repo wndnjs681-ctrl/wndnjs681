@@ -1,0 +1,39 @@
+{
+ "generated_at": "2026-10-31T11:20:01+09:00",
+ "markets": {
+  "kr": {
+   "asof": "2026-10-30",
+   "n": 1297,
+   "shards": 16,
+   "sc": 1,
+   "daily_years": 2.0,
+   "from": "2000-01-04",
+   "bytes": 15372013,
+   "max_shard": 1090617
+  },
+  "us": {
+   "asof": "2026-10-30",
+   "n": 1236,
+   "shards": 16,
+   "sc": 100,
+   "daily_years": 2.0,
+   "from": "2000-01-03",
+   "bytes": 19245231,
+   "max_shard": 1439183
+  }
+ },
+ "diag": {
+  "us": {
+   "inc": 1211,
+   "full": 25,
+   "refetch": 23,
+   "fail": 2,
+   "skipped": 0,
+   "jumps": 358,
+   "fails": [
+    "BRK.B:HTTPError",
+    "BRK.A:HTTPError"
+   ]
+  }
+ }
+}
