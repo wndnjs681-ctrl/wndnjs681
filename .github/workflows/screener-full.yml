@@ -105,6 +105,11 @@ jobs:
         continue-on-error: true
         run: python market_index.py
 
+      - name: Derivatives positioning (CFTC·VIX 곡선·풋콜)
+        if: steps.gate.outputs.markets != ''
+        continue-on-error: true
+        run: python derivs.py
+
       - name: Commit output
         if: steps.gate.outputs.markets != ''
         run: |

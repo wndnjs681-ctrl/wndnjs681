@@ -96,9 +96,10 @@ def main():
     out = {}
     p = os.path.join(OUT_DIR, "market_index.json")
     try:                                                     # 이전 결과 — 이번에 받은 게 더 오래됐으면 지난 마감을 지키려고
-        prev = json.load(open(p, encoding="utf-8")).get("idx", {})
+        prev_all = json.load(open(p, encoding="utf-8"))
+        prev = prev_all.get("idx", {})
     except Exception:
-        prev = {}
+        prev_all, prev = {}, {}
     for key, syms, name, mk, rg, tz, ready, core, kind in IDX:
         got = used = None
         for sym in syms:
@@ -132,7 +133,8 @@ def main():
             print(f"[{key}] 이번엔 못 받음 — 지난 값 유지(마지막 {pv['d'][-1]})")
     if not out:
         sys.exit("지수를 하나도 받지 못했습니다")
-    json.dump({"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "idx": out},
+    json.dump({"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "idx": out,
+               **({"deriv": prev_all["deriv"]} if prev_all.get("deriv") else {})},   # 파생 포지션(derivs.py)은 그대로 둔다
               open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print(f"→ {p} {os.path.getsize(p):,} bytes")
 
