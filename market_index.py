@@ -43,29 +43,38 @@ IDX = [
 ]
 
 
+KEEP = int(os.getenv("IDX_DAYS", "1300"))              # 약 5년 — 대시보드 지수 차트(주·월봉)용
+
+
+def _r(x):
+    return None if x is None else round(x, 4 if abs(x) < 50 else 2)
+
+
 def yahoo(sym, tz):
-    """(날짜, 종가, 거래량). 날짜는 야후가 알려주는 거래소 시간대 기준(외환처럼 24시간 시장도 맞게)."""
+    """{날짜: (시, 고, 저, 종, 거래량)}. 날짜는 야후가 알려주는 거래소 시간대 기준(외환처럼 24시간 시장도 맞게)."""
     for host in ("query1", "query2"):
         try:
             r = requests.get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{sym}",
-                             params={"range": "2y", "interval": "1d"}, headers={"User-Agent": UA}, timeout=30)
+                             params={"range": "5y", "interval": "1d"}, headers={"User-Agent": UA}, timeout=30)
             res = r.json()["chart"]["result"][0]
             q = res["indicators"]["quote"][0]
-            ztz = ZoneInfo((res.get("meta") or {}).get("exchangeTimezoneName") or tz)
-            m = {}
-            for t, cl, vo in zip(res["timestamp"], q["close"], q.get("volume") or [None] * len(q["close"])):
-                if cl is None:
-                    continue
-                m[datetime.fromtimestamp(t, ztz).strftime("%Y-%m-%d")] = (round(cl, 4 if cl < 50 else 2), int(vo or 0))
             meta = res.get("meta") or {}
+            ztz = ZoneInfo(meta.get("exchangeTimezoneName") or tz)
+            n = len(q["close"]); nul = [None] * n
+            m = {}
+            for t, o, h, l, cl, vo in zip(res["timestamp"], q.get("open") or nul, q.get("high") or nul, q.get("low") or nul,
+                                          q["close"], q.get("volume") or nul):
+                if cl is None:
+                    continue                                 # 같은 날짜가 두 번이면 뒤의 값(마감)을 쓴다
+                m[datetime.fromtimestamp(t, ztz).strftime("%Y-%m-%d")] = (_r(o), _r(h), _r(l), _r(cl), int(vo or 0))
             px, pt = meta.get("regularMarketPrice"), meta.get("regularMarketTime")
-            if px and pt:                                    # 2년치 일봉이 하루 이틀 늦게 붙을 때가 있다 — 마지막 체결가로 메운다
+            if px and pt:                                    # 일봉이 하루 이틀 늦게 붙을 때가 있다 — 마지막 체결가로 메운다
                 md = datetime.fromtimestamp(pt, ztz).strftime("%Y-%m-%d")
                 if m and md > max(m):
-                    m[md] = (round(px, 4 if px < 50 else 2), int(meta.get("regularMarketVolume") or 0))
-            if len(m) > 100:                                 # 같은 날짜가 두 번이면 뒤의 값(마감)을 쓴다
-                d = sorted(m)
-                return d, [m[x][0] for x in d], [m[x][1] for x in d]
+                    m[md] = (None, _r(meta.get("regularMarketDayHigh")), _r(meta.get("regularMarketDayLow")), _r(px),
+                             int(meta.get("regularMarketVolume") or 0))
+            if len(m) > 100:
+                return m
         except Exception as e:
             print(f"  {sym} {host}: {type(e).__name__} {e}"[:150])
         time.sleep(1)
@@ -83,9 +92,10 @@ def fdr(sym):
         return None
     try:
         import FinanceDataReader as F
-        df = F.DataReader(FDR[sym], (datetime.now() - timedelta(days=740)).strftime("%Y-%m-%d")).dropna(subset=["Close"])
-        return ([i.strftime("%Y-%m-%d") for i in df.index], [round(float(x), 2) for x in df["Close"]],
-                [int(x or 0) for x in df.get("Volume", [0] * len(df))])
+        df = F.DataReader(FDR[sym], (datetime.now() - timedelta(days=int(KEEP * 1.45))).strftime("%Y-%m-%d")).dropna(subset=["Close"])
+        g = lambda row, k: _r(float(row[k])) if k in row and row[k] == row[k] else None
+        return {i.strftime("%Y-%m-%d"): (g(row, "Open"), g(row, "High"), g(row, "Low"), g(row, "Close"), int(row.get("Volume", 0) or 0))
+                for i, row in df.iterrows()}
     except Exception as e:
         print(f"  {sym} FDR: {type(e).__name__} {e}"[:150])
         return None
@@ -110,23 +120,22 @@ def main():
         if not got:
             print(f"[{key}] 실패 ({', '.join(syms)})")
             continue
-        d, c, v = got
         now = datetime.now(ZoneInfo(tz))                     # 마감 전 실행이면 당일 봉은 현재가라 뺀다
         lastok = (now.date() if (now.hour, now.minute) >= ready else now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
-        while d and d[-1] > lastok:
-            d, c, v = d[:-1], c[:-1], v[:-1]
+        m = {x: y for x, y in got.items() if x <= lastok}
         pv = prev.get(key)
-        if pv and pv.get("d") and (not d or pv["d"][-1] > d[-1]):   # 야후가 늦은 데이터를 주면 이전 마감을 이어 붙인다(되돌아가지 않게)
-            pm = {x: (cc, vv) for x, cc, vv in zip(pv["d"], pv["c"], pv.get("v") or [0] * len(pv["d"]))}
-            pm.update({x: (cc, vv) for x, cc, vv in zip(d, c, v)})
-            k = sorted(x for x in pm if x <= lastok)
-            print(f"  [{key}] 받은 데이터가 이전보다 늦음({d[-1] if d else '-'} < {pv['d'][-1]}) — 이전 마감 유지")
-            d, c, v = k, [pm[x][0] for x in k], [pm[x][1] for x in k]
-        if not d:
+        if pv and pv.get("d") and (not m or pv["d"][-1] > max(m)):   # 야후가 늦은 데이터를 주면 이전 마감을 이어 붙인다(되돌아가지 않게)
+            nn = len(pv["d"]); col = lambda f: pv.get(f) or [None] * nn
+            pm = {x: (o, h, l, cc, vv or 0) for x, o, h, l, cc, vv in zip(pv["d"], col("o"), col("h"), col("l"), pv["c"], col("v")) if x <= lastok}
+            print(f"  [{key}] 받은 데이터가 이전보다 늦음({max(m) if m else '-'} < {pv['d'][-1]}) — 이전 마감 유지")
+            pm.update(m); m = pm
+        if not m:
             continue
+        d = sorted(m)[-KEEP:]
+        o, h, l, c, v = ([m[x][i] for x in d] for i in range(5))
         out[key] = {"name": name, "mk": mk, "rg": rg, "core": core, "kind": kind, "sym": used,
-                    "d": d[-400:], "c": c[-400:], "v": v[-400:]}
-        print(f"[{key}] {name}({used}) {len(d)}일 · 마지막 {d[-1]} {c[-1]:,} · 거래량 0인 날 {sum(1 for x in v[-60:] if not x)}/60")
+                    "d": d, "o": o, "h": h, "l": l, "c": c, "v": v}
+        print(f"[{key}] {name}({used}) {len(d)}일 · 마지막 {d[-1]} {c[-1]:,} · 시고저 있음 {sum(1 for x in o[-60:] if x is not None)}/60 · 거래량 0인 날 {sum(1 for x in v[-60:] if not x)}/60")
     for key, pv in prev.items():                             # 이번에 아예 못 받은 지수는 지난 값을 그대로 둔다
         if key not in out and any(key == x[0] for x in IDX):
             out[key] = pv
