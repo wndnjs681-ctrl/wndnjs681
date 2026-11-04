@@ -151,15 +151,42 @@ def putcall():
     return rows
 
 
+def kr_flow(old):
+    """네이버 — 코스피200 선물·코스피 현물 투자자별 순매수(억원). 하루치만 주므로 날마다 쌓는다(장 마감 15:45 이후 값만 확정으로)."""
+    hist = {x["d"]: x for x in (old or [])}
+    now = datetime.now(KST)
+    num = lambda v: int(str(v).replace(",", "").replace("+", "") or 0)
+    row = {}
+    for code, key in (("FUT", "fut"), ("KOSPI", "spot")):
+        try:
+            j = requests.get(f"https://m.stock.naver.com/api/index/{code}/trend",
+                             headers={"User-Agent": UA, "Referer": "https://m.stock.naver.com/"}, timeout=20).json()
+            d = j["bizdate"]
+            row["d"] = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+            row[key] = {"frn": num(j["foreignValue"]), "ind": num(j["personalValue"]), "ins": num(j["institutionalValue"])}
+        except Exception as e:
+            print(f"  네이버 {code}: {type(e).__name__} {e}"[:150])
+    if row.get("d") and (row["d"] < now.strftime("%Y-%m-%d") or (now.hour, now.minute) >= (15, 45)):
+        hist[row["d"]] = row
+        print("국내 수급:", row)
+    elif row:
+        print("국내 수급: 장중 값이라 저장 안 함", row)
+    return [hist[k] for k in sorted(hist)][-250:] or None
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    res = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "cot": tff(), "vol": vol(), "pc": putcall()}
+    try:
+        old_kr = (json.load(open(os.path.join(OUT, "market_index.json"), encoding="utf-8")).get("deriv") or {}).get("kr")
+    except Exception:
+        old_kr = None
+    res = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "cot": tff(), "vol": vol(), "pc": putcall(), "kr": kr_flow(old_kr)}
     json.dump(res, open(os.path.join(OUT, "derivs.json"), "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     p = os.path.join(OUT, "market_index.json")
     try:
         mi = json.load(open(p, encoding="utf-8"))
         old = mi.get("deriv") or {}
-        for k in ("cot", "vol", "pc"):                     # 이번에 못 받은 항목은 지난 값 유지
+        for k in ("cot", "vol", "pc", "kr"):                     # 이번에 못 받은 항목은 지난 값 유지
             if not res.get(k) and old.get(k):
                 res[k] = old[k]
         mi["deriv"] = res
