@@ -143,7 +143,7 @@ def main():
     if not out:
         sys.exit("지수를 하나도 받지 못했습니다")
     json.dump({"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "idx": out,
-               **({"deriv": prev_all["deriv"]} if prev_all.get("deriv") else {})},   # 파생 포지션(derivs.py)은 그대로 둔다
+               **{k: prev_all[k] for k in ("deriv", "flow") if prev_all.get(k)}},   # 파생 포지션(derivs.py)·수급(kr_flow.py)은 그대로 둔다
               open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print(f"→ {p} {os.path.getsize(p):,} bytes")
 

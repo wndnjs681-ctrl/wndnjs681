@@ -110,6 +110,11 @@ jobs:
         continue-on-error: true
         run: python derivs.py
 
+      - name: Korean investor flow (수급)
+        if: steps.gate.outputs.markets != ''
+        continue-on-error: true
+        run: python kr_flow.py
+
       - name: Commit output
         if: steps.gate.outputs.markets != ''
         run: |

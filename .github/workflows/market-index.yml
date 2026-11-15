@@ -28,6 +28,10 @@ jobs:
       - name: Derivatives positioning (CFTC·VIX 곡선·풋콜)
         continue-on-error: true
         run: python derivs.py
+
+      - name: Korean investor flow (수급)
+        continue-on-error: true
+        run: python kr_flow.py
       - name: Commit
         run: |
           git config user.name  "github-actions[bot]"
