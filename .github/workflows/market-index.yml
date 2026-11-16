@@ -32,6 +32,13 @@ jobs:
       - name: Korean investor flow (수급)
         continue-on-error: true
         run: python kr_flow.py
+
+      - name: Program trading by stock (한국투자증권 Open API)
+        continue-on-error: true
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_APPKEY || secrets.APP_KEY || secrets.APPKEY || secrets.KIS_KEY || secrets.KIS_API_KEY || secrets.KOREA_INVEST_APP_KEY || secrets.HANTU_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_APPSECRET || secrets.APP_SECRET || secrets.APPSECRET || secrets.KIS_SECRET || secrets.KIS_API_SECRET || secrets.KOREA_INVEST_APP_SECRET || secrets.HANTU_APP_SECRET }}
+        run: python kr_prog_kis.py
       - name: Commit
         run: |
           git config user.name  "github-actions[bot]"

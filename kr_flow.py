@@ -145,6 +145,8 @@ def main():
     for k in ("kospi", "kosdaq", "stocks"):                    # 이번에 못 받은 항목은 지난 값 유지
         if not res.get(k) and old.get(k):
             res[k] = old[k]
+    if old.get("kprog"):                                       # 종목별 프로그램(kr_prog_kis.py)은 그대로 둔다
+        res["kprog"] = old["kprog"]
     mi["flow"] = res
     json.dump(mi, open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     k = res["kospi"][-1] if res["kospi"] else None
