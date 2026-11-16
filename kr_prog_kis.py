@@ -100,9 +100,9 @@ def main():
         data = sorted(data, key=lambda x: x.get("stck_bsop_date", ""))[-20:]
         d = [x.get("stck_bsop_date", "") for x in data]
         px = [pick(x, "stck_clpr") for x in data]
-        na = [round((pick(x, "whol_smtn_ntby_tr_pbmn") or 0) / 100, 1) for x in data]     # 백만원 → 억원
-        nb = [round((pick(x, "whol_smtn_shnu_tr_pbmn") or 0) / 100, 1) for x in data]
-        ns = [round((pick(x, "whol_smtn_seln_tr_pbmn") or 0) / 100, 1) for x in data]
+        na = [round((pick(x, "whol_smtn_ntby_tr_pbmn") or 0) / 1e8, 1) for x in data]     # 원 → 억원
+        nb = [round((pick(x, "whol_smtn_shnu_tr_pbmn") or 0) / 1e8, 1) for x in data]
+        ns = [round((pick(x, "whol_smtn_seln_tr_pbmn") or 0) / 1e8, 1) for x in data]
         nq = [int(pick(x, "whol_smtn_ntby_qty") or 0) for x in data]
         out.append({"t": r["ticker"], "n": r.get("name") or r["ticker"], "sec": r.get("sector") or "", "d": d, "px": px,
                     "na": na, "buy": nb, "sell": ns, "nq": nq})
