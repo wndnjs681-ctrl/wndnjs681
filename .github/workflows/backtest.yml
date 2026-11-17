@@ -34,11 +34,17 @@ jobs:
           PYTHONUNBUFFERED: "1"
           MARKETS: ${{ github.event.inputs.markets || 'us,kr' }}
         run: python backtest_masters.py
+      - name: Portfolio style backtest (포트폴리오 설계)
+        continue-on-error: true
+        env:
+          PYTHONUNBUFFERED: "1"
+          MARKETS: ${{ github.event.inputs.markets || 'us,kr' }}
+        run: python backtest_styles.py
       - name: Commit
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add output/backtest_*.json 2>/dev/null || true
+          git add output/backtest_*.json output/pb_backtest.json 2>/dev/null || true
           git diff --staged --quiet || git commit -m "backtest: $(date -u +%Y-%m-%d)"
           git pull --rebase --autostash || true
           git push
