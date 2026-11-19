@@ -362,10 +362,11 @@ def macro():
                             if seen[key] is not None:
                                 seen[key]["x"] = (seen[key].get("x", "") + " · " + ev + _val(r))[:240]
                             break
-                        kst = to_kst(d.isoformat(), r.get("gmt"))
+                        d1 = d - timedelta(days=1)            # 나스닥 date 파라미터는 하루 늦게 나옴(연준·TE 일정과 대조해 확인)
+                        kst = to_kst(d1.isoformat(), r.get("gmt"))
                         mk_ = CTRY.get(c, "gl")
-                        dd = d if mk_ == "us" or not kst else date(d.year + (kst[:2] == "01" and d.month == 12), int(kst[:2]), int(kst[3:5]))   # 미국 밖 일정은 한국 날짜에
-                        add(dd, mk_, "cb" if "금리" in ko or "FOMC" in ko else "macro", ko, imp, kst=kst, x=ev + _val(r))
+                        dd = d1 if mk_ == "us" or not kst else datetime.strptime(f"{d1.year + (kst[:2] == '01' and d1.month == 12)}/{kst[:5]}", "%Y/%m/%d").date()   # 미국 밖 일정은 한국 날짜에
+                        add(dd, mk_, "cb" if "금리" in ko or "FOMC" in ko else "macro", ko, imp, kst=kst, x=ev + _val(r), src="nq")
                         seen[key] = EV[-1] if EV and EV[-1]["n"] == ko else None
                         hit += 1
                         break
@@ -422,8 +423,10 @@ def te():
             cons = cells[6] if len(cells) > 6 else ""
             fc = cells[7] if len(cells) > 7 else ""
             val = ", ".join(x for x in [f"실제 {act}" if act else "", f"예상 {cons or fc}" if (cons or fc) else "", f"이전 {prev}" if prev else ""] if x)
+            if "금리" in ko and not re.search(r"Interest Rate|Deposit|Refinanc|Decision", name, re.I):
+                continue                                    # 의사록·연설·의견 요약 등은 뺌
             add(et.date() if mk == "us" else kt.date(), mk, "cb" if "금리" in ko else "macro", ko, imp, kst=kt.strftime("%m/%d %H:%M"),
-                x=f"{name}{' (' + ref + ')' if ref else ''}{' · ' + val if val else ''}")
+                x=f"{name}{' (' + ref + ')' if ref else ''}{' · ' + val if val else ''}", src="te")
             hit += 1
         time.sleep(0.6)
     LOG["te"] = f"{hit}건 / {ok}/{len(TE)}쪽"
@@ -630,7 +633,7 @@ def main():
     have = {(e["mk"], e["cat"]) for e in EV}
     keep = [e for e in old.get("ev", []) if (e.get("mk"), e.get("cat")) not in have and D0.isoformat() <= e.get("d", "") <= D1.isoformat()]
     now_keys = {(e["d"], e["n"]) for e in EV}                 # 경제지표는 이번에 빠진 날이 있어도 지난번에 받은 건 유지
-    keep += [e for e in old.get("ev", []) if e.get("cat") in ("macro", "cb") and e.get("kst") and not e.get("est") and (e.get("mk"), e.get("cat")) in have
+    keep += [e for e in old.get("ev", []) if e.get("cat") in ("macro", "cb") and e.get("src") and not e.get("est") and (e.get("mk"), e.get("cat")) in have
              and (e["d"], e["n"]) not in now_keys and D0.isoformat() <= e["d"] <= D1.isoformat()]
     if keep:
         print(f"지난 값 유지 {len(keep)}건:", sorted({(e['mk'], e['cat']) for e in keep}))
