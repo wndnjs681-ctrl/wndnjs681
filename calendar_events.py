@@ -379,7 +379,7 @@ def dart_earn(big):
                 break
         if not d:
             continue
-        purpose = re.search(r"(?:개최\s*목적|목\s*적)\s*[:：]?\s*(.{0,60})", txt)
+        purpose = re.search(r"(?:개최\s*목적|목\s*적)\s*[:：]?\s*(.{0,60}?)(?=\s\d\s*\.\s|$)", txt[:1500])
         call = kind == "ir" and re.search(r"컨퍼런스\s*콜|conference\s*call|어닝\s*콜|웹캐스트|webcast", txt, re.I)
         add(d, "kr", "earn", f"{name} 실적 발표" + (" · 컨퍼런스콜" if call else " · 설명회" if kind == "ir" else " 예정"), max(imp, 2), tk=sc, src="dart", conf=True,
             kst=(d.strftime("%m/%d") + " " + tm) if tm else None,
