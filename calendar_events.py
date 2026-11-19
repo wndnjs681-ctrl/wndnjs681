@@ -375,73 +375,61 @@ def macro():
     print("나스닥 미국 지표 중 안 쓴 이름:", ", ".join(f"{k}({v})" for k, v in other.most_common(70)))
 
 
-# ───────────────────────── 야후 파이낸스 경제 캘린더(주 단위) ─────────────────────────
-YCTRY = {"US": "United States", "KR": "South Korea", "CN": "China", "JP": "Japan", "EU": "Euro Zone", "EZ": "Euro Zone", "EMU": "Euro Zone"}
-YROW = re.compile(r'\["([^"\]]+)","([A-Z]{2,3})","(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)","([^"]*)",(null|"[^"]*"),(null|"[^"]*"),(null|"[^"]*"),(null|"[^"]*")\]')
+# ───────────────────────── Trading Economics 지표별 발표 일정(직전 2회 + 다음 1회, GMT) ─────────────────────────
+TE = [  # (경로, 시장, 이름, 중요도)
+    ("united-states/non-farm-payrolls", "us", "미국 고용보고서(비농업 고용)", 3), ("united-states/inflation-cpi", "us", "미국 소비자물가(CPI)", 3),
+    ("united-states/producer-prices-change", "us", "미국 생산자물가(PPI)", 2), ("united-states/core-pce-price-index-mom", "us", "미국 PCE 물가", 3),
+    ("united-states/gdp-growth", "us", "미국 GDP", 3), ("united-states/retail-sales", "us", "미국 소매판매", 2),
+    ("united-states/business-confidence", "us", "ISM 제조업 PMI", 2), ("united-states/non-manufacturing-pmi", "us", "ISM 서비스업 PMI", 2),
+    ("united-states/job-offers", "us", "JOLTS 구인", 2), ("united-states/consumer-confidence", "us", "미시간대 소비자심리", 1),
+    ("south-korea/interest-rate", "kr", "한국은행 금통위 기준금리 결정", 3), ("south-korea/inflation-cpi", "kr", "한국 소비자물가", 2),
+    ("south-korea/exports", "kr", "한국 수출입", 2), ("south-korea/gdp-growth", "kr", "한국 GDP", 2),
+    ("japan/interest-rate", "gl", "일본은행 금리 결정", 2), ("euro-area/interest-rate", "gl", "ECB 금리 결정", 2),
+    ("china/inflation-cpi", "gl", "중국 소비자물가", 1), ("china/business-confidence", "gl", "중국 제조업 PMI", 1), ("china/gdp-growth-annual", "gl", "중국 GDP", 2),
+]
+TEROW = re.compile(r"<tr[^>]*data-category=\"([^\"]*)\"[^>]*>(.*?)</tr>", re.S)
 
 
-def yahoo_econ():
+def te():
     H = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9"}
-    wk = max(D0, TODAY - timedelta(days=21))                 # 하루씩(페이지가 'day' 하루만 보여 줌)
-    seen, hit, pages, ymerge = {}, 0, 0, {}
-    while wk <= D1 and not over():
-        we = wk
-        if wk.weekday() >= 5:
-            wk += timedelta(days=1)
+    hit, ok = 0, 0
+    for path, mk, ko, imp in TE:
+        if over():
+            break
+        try:
+            r = requests.get("https://tradingeconomics.com/" + path, headers=H, timeout=15)
+        except Exception as e:
+            print(f"[TE {path}] {type(e).__name__}")
             continue
-        new_tot = 0
-        for off in range(0, 600, 100):
+        i = r.text.find('id="calendar"')
+        if r.status_code != 200 or i < 0:
+            print(f"[TE {path}] {r.status_code} 일정 표 없음")
+            continue
+        ok += 1
+        seg = r.text[i: r.text.find("hasCalendar", i) if r.text.find("hasCalendar", i) > 0 else i + 8000]
+        for cat, body in TEROW.findall(seg):
+            cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", c)).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", body, re.S)]
+            if len(cells) < 5:
+                continue
             try:
-                r = requests.get("https://finance.yahoo.com/calendar/economic", headers=H, timeout=15,
-                                 params={"from": wk.isoformat(), "to": we.isoformat(), "day": wk.isoformat(), "offset": off, "size": 100})
-                txt = r.text.replace('\\\\"', '"').replace('\\"', '"')
-            except Exception as e:
-                print(f"[야후 {wk}] {type(e).__name__}")
-                break
-            pages += 1
-            rows = YROW.findall(txt)
-            new = 0
-            for nm, cc, ts, per, act, exp, pri, rev in rows:
-                k = (nm, cc, ts)
-                if k in seen:
-                    continue
-                seen[k] = 1
-                new += 1
-                c = YCTRY.get(cc)
-                if not c:
-                    continue
-                for c2, rx, ko, imp in MACRO:
-                    if c2 == c and re.search(rx, nm, re.I):
-                        t = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-                        et = t.astimezone(timezone(timedelta(hours=-4 if nth_wd(t.year, 3, 6, 2) <= t.date() < nth_wd(t.year, 11, 6, 1) else -5)))
-                        kt = t.astimezone(KST)
-                        mk_ = CTRY.get(c, "gl")
-                        q = lambda v: v.strip('"') if v != "null" else ""
-                        val = ", ".join(x for x in [f"예상 {q(exp)}" if q(exp) else "", f"이전 {q(pri)}" if q(pri) else "", f"실제 {q(act)}" if q(act) else ""] if x)
-                        dd = et.date() if mk_ == "us" else kt.date()
-                        xx = f"{nm}{' (' + per + ')' if per else ''}{' · ' + val if val else ''}"
-                        if (dd, ko) in ymerge:                      # 같은 날 같은 지표(헤드라인·근원 등)는 한 줄로
-                            ymerge[(dd, ko)]["x"] = (ymerge[(dd, ko)]["x"] + " / " + xx)[:260]
-                            break
-                        add(dd, mk_, "cb" if "금리" in ko else "macro", ko, imp, kst=kt.strftime("%m/%d %H:%M"), x=xx)
-                        if EV and EV[-1]["n"] == ko:
-                            ymerge[(dd, ko)] = EV[-1]
-                        hit += 1
-                        break
-            new_tot += new
-            if len(rows) < 100 or not new:                   # 마지막 쪽
-                break
-            time.sleep(0.4)
-        if pages <= 3 or wk.day in (1, 15):
-            print(f"[야후 {wk}] {new_tot}줄 · 누적 {hit}건 · {time.time() - T0:.0f}초")
-        wk += timedelta(days=1)
-        time.sleep(0.3)
-    LOG["yahoo"] = f"{hit}건 / {pages}쪽"
+                t = datetime.strptime(cells[0] + " " + (cells[1] or "12:00 AM"), "%Y-%m-%d %I:%M %p").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            et = t.astimezone(timezone(timedelta(hours=-4 if nth_wd(t.year, 3, 6, 2) <= t.date() < nth_wd(t.year, 11, 6, 1) else -5)))
+            kt = t.astimezone(KST)
+            name, ref = cells[2], cells[3]
+            act, prev = cells[4], cells[5] if len(cells) > 5 else ""
+            cons = cells[6] if len(cells) > 6 else ""
+            fc = cells[7] if len(cells) > 7 else ""
+            val = ", ".join(x for x in [f"실제 {act}" if act else "", f"예상 {cons or fc}" if (cons or fc) else "", f"이전 {prev}" if prev else ""] if x)
+            add(et.date() if mk == "us" else kt.date(), mk, "cb" if "금리" in ko else "macro", ko, imp, kst=kt.strftime("%m/%d %H:%M"),
+                x=f"{name}{' (' + ref + ')' if ref else ''}{' · ' + val if val else ''}")
+            hit += 1
+        time.sleep(0.6)
+    LOG["te"] = f"{hit}건 / {ok}/{len(TE)}쪽"
 
 
-# ───────────────────────── BLS 공식 발표 일정(고용보고서·CPI·PPI·JOLTS) ─────────────────────────
-BLS = [("empsit", 50, "미국 고용보고서(비농업 고용)", 3, "비농업 고용·실업률·임금"), ("cpi", 10, "미국 소비자물가(CPI)", 3, "헤드라인·근원 CPI"),
-       ("ppi", 46, "미국 생산자물가(PPI)", 2, "헤드라인·근원 PPI"), ("jolts", 192, "JOLTS 구인", 2, "구인·이직")]
+# ───────────────────────── 고용보고서 날짜 규칙(다른 출처에 없을 때) ─────────────────────────
 MON3 = {m: i + 1 for i, m in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
 
 
@@ -460,27 +448,8 @@ def _dates(txt):
     return out
 
 
-def bls():
-    """BLS 지표별 발표 일정 페이지(액션 IP 는 403 이 많음). 08:30(미 동부) 발표, JOLTS 는 10:00."""
-    H = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.bls.gov/"}
-    got = {}
-    for code, rid, ko, imp, what in BLS:
-        ds, src = set(), ""
-        for url in (f"https://www.bls.gov/schedule/news_release/{code}.htm",):
-            try:
-                r = requests.get(url, headers=H, timeout=15)
-                if r.status_code == 200:
-                    ds, src = _dates(r.text), "BLS"
-                print(f"[BLS {code}] {r.status_code} · 날짜 {len(ds)}개")
-            except Exception as e:
-                print(f"[BLS {code}] {type(e).__name__}")
-        ds = {d for d in ds if D0 <= d <= D1 and d.weekday() < 5}
-        got[code] = f"{len(ds)}({src or '실패'})"
-        for d in sorted(ds):
-            hh, mm = (10, 0) if code == "jolts" else (8, 30)
-            add(d, "us", "macro", ko, imp, kst=et_kst(d, hh, mm), x=f"{what} · {src} 공식 발표 일정")
-    LOG["bls"] = got
-    if not any(e["n"].startswith("미국 고용보고서") and e["d"] >= TODAY.isoformat() for e in EV):
+def nfp_check():
+    if not any(e["n"].startswith("미국 고용보고서") and e["d"] >= TODAY.isoformat() and not e.get("est") for e in EV):
         nfp_rule()
 
 
@@ -647,7 +616,7 @@ def main():
         for d, n in early.items():
             add(d, "us", "holiday", n, 1)
 
-    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("미국 IPO", us_ipo), ("야후 경제지표", yahoo_econ), ("경제지표", macro), ("BLS 일정", bls)):
+    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("미국 IPO", us_ipo), ("TE 지표 일정", te), ("경제지표", macro), ("고용보고서 규칙", nfp_check)):
         n0 = len(EV)
         try:
             fn()
