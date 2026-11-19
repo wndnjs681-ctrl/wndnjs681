@@ -290,7 +290,8 @@ def dart_doc_text(sess, rcept_no):
             except UnicodeDecodeError:
                 continue
     t = re.sub(r"<[^>]+>", " ", " ".join(out))
-    return re.sub(r"\s+", " ", t.replace("&nbsp;", " "))
+    import html as _h
+    return re.sub(r"\s+", " ", _h.unescape(t))
 
 
 def dart_earn(big):
