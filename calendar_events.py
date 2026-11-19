@@ -382,10 +382,13 @@ YROW = re.compile(r'\["([^"\]]+)","([A-Z]{2,3})","(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\
 
 def yahoo_econ():
     H = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9"}
-    wk = D0 - timedelta(days=D0.weekday() + 1)              # 일요일 시작
+    wk = max(D0, TODAY - timedelta(days=21))                 # 하루씩(페이지가 'day' 하루만 보여 줌)
     seen, hit, pages, ymerge = {}, 0, 0, {}
     while wk <= D1 and not over():
-        we = wk + timedelta(days=6)
+        we = wk
+        if wk.weekday() >= 5:
+            wk += timedelta(days=1)
+            continue
         new_tot = 0
         for off in range(0, 600, 100):
             try:
@@ -429,10 +432,10 @@ def yahoo_econ():
             if len(rows) < 100 or not new:                   # 마지막 쪽
                 break
             time.sleep(0.4)
-        if wk <= TODAY <= we or pages <= 2:
-            print(f"[야후 {wk}~{we}] {new_tot}줄 · 누적 {hit}건")
-        wk += timedelta(days=7)
-        time.sleep(0.4)
+        if pages <= 3 or wk.day in (1, 15):
+            print(f"[야후 {wk}] {new_tot}줄 · 누적 {hit}건 · {time.time() - T0:.0f}초")
+        wk += timedelta(days=1)
+        time.sleep(0.3)
     LOG["yahoo"] = f"{hit}건 / {pages}쪽"
 
 
@@ -658,7 +661,7 @@ def main():
     have = {(e["mk"], e["cat"]) for e in EV}
     keep = [e for e in old.get("ev", []) if (e.get("mk"), e.get("cat")) not in have and D0.isoformat() <= e.get("d", "") <= D1.isoformat()]
     now_keys = {(e["d"], e["n"]) for e in EV}                 # 경제지표는 이번에 빠진 날이 있어도 지난번에 받은 건 유지
-    keep += [e for e in old.get("ev", []) if e.get("cat") in ("macro", "cb") and e.get("kst") and (e.get("mk"), e.get("cat")) in have
+    keep += [e for e in old.get("ev", []) if e.get("cat") in ("macro", "cb") and e.get("kst") and not e.get("est") and (e.get("mk"), e.get("cat")) in have
              and (e["d"], e["n"]) not in now_keys and D0.isoformat() <= e["d"] <= D1.isoformat()]
     if keep:
         print(f"지난 값 유지 {len(keep)}건:", sorted({(e['mk'], e['cat']) for e in keep}))
