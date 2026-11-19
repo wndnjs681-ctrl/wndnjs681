@@ -123,6 +123,14 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_APPSECRET || secrets.APP_SECRET || secrets.APPSECRET || secrets.KIS_SECRET || secrets.KIS_API_SECRET || secrets.KOREA_INVEST_APP_SECRET || secrets.HANTU_APP_SECRET }}
         run: python kr_prog_kis.py
 
+      - name: Market calendar (주요 일정)
+        if: steps.gate.outputs.markets != ''
+        continue-on-error: true
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_APPKEY || secrets.APP_KEY || secrets.APPKEY || secrets.KIS_KEY || secrets.KIS_API_KEY || secrets.KOREA_INVEST_APP_KEY || secrets.HANTU_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_APPSECRET || secrets.APP_SECRET || secrets.APPSECRET || secrets.KIS_SECRET || secrets.KIS_API_SECRET || secrets.KOREA_INVEST_APP_SECRET || secrets.HANTU_APP_SECRET }}
+        run: python calendar_events.py
+
       - name: Commit output
         if: steps.gate.outputs.markets != ''
         run: |
