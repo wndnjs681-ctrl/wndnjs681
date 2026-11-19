@@ -229,7 +229,7 @@ def kr_ksd(tok, big):
         if "신규" in kind or "공모" in kind:
             add(d, "kr", "ipo", f"{nm} 신규 상장", 2, tk=t, x=kind)
         elif pct is not None and pct >= 1:                     # 추가 상장 — 발행주식의 1% 이상만(물량 부담)
-            add(d, "kr", "cap", f"{nm} 추가 상장 {pct:.1f}%", 2 if pct >= 5 else 1, tk=t, x=f"{kind} · {q:,.0f}주")
+            add(d, "kr", "cap", f"{nm} 추가 상장 {pct:.1f}%", 2 if pct >= 5 and "무상" not in kind else 1, tk=t, x=f"{kind} · {q:,.0f}주")
     for r in ksd(tok, "mandDeposit"):
         t, nm = g(r, "sht_cd"), g(r, "isin_name", "kor_isnm")
         rng = re.findall(r"\d{4}[./-]?\d{2}[./-]?\d{2}", str(g(r, "depo_date") or ""))   # "예치일 ~ 반환일"
