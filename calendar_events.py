@@ -329,8 +329,13 @@ def macro():
     seen = {}
     while d <= D1:
         if d.weekday() < 5:
-            j = nasdaq("calendar/economicevents", {"date": d.isoformat()})
-            rows = ((j.get("data") or {}).get("rows")) or []
+            rows = []
+            for k in range(3):                              # 가끔 빈 응답 — 잠깐 쉬고 다시
+                j = nasdaq("calendar/economicevents", {"date": d.isoformat()})
+                rows = ((j.get("data") or {}).get("rows")) or []
+                if rows or over():
+                    break
+                time.sleep(1.5 + k)
             if first:
                 print("나스닥 경제지표 응답 예시:", rows[:2] if rows else str(j)[:300])
                 first = False
@@ -524,6 +529,9 @@ def main():
     # 이번에 못 받은 출처는 지난 값 유지(카테고리·시장 단위)
     have = {(e["mk"], e["cat"]) for e in EV}
     keep = [e for e in old.get("ev", []) if (e.get("mk"), e.get("cat")) not in have and D0.isoformat() <= e.get("d", "") <= D1.isoformat()]
+    now_keys = {(e["d"], e["n"]) for e in EV}                 # 경제지표는 이번에 빠진 날이 있어도 지난번에 받은 건 유지
+    keep += [e for e in old.get("ev", []) if e.get("cat") in ("macro", "cb") and e.get("kst") and (e.get("mk"), e.get("cat")) in have
+             and (e["d"], e["n"]) not in now_keys and D0.isoformat() <= e["d"] <= D1.isoformat()]
     if keep:
         print(f"지난 값 유지 {len(keep)}건:", sorted({(e['mk'], e['cat']) for e in keep}))
     ev = sorted(EV + keep, key=lambda e: (e["d"], -e["imp"], e["n"]))
