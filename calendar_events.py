@@ -242,7 +242,8 @@ def kr_ksd(tok, big):
         pct = q / sh * 100 if q and sh else None
         val = q * px / 1e8 if q and px else None                    # 억원
         why = str(g(r, "depo_reason", "dpst_rson", "reason") or "").strip(" -")
-        add(d, "kr", "lock", f"{nm} 보호예수 해제", 2 if (pct or 0) >= 3 or (val or 0) >= 100 else 1, tk=t,
+        small = pct is not None and pct < 1 and (val or 0) < 30
+        add(d, "kr", "lock", f"{nm} 보호예수 해제", 1 if small else 2, tk=t,
             x=" · ".join(x for x in [f"{q:,.0f}주" if q else "", f"상장주식의 약 {pct:.1f}%" if pct else "", f"약 {val:,.0f}억원" if val else "", why,
                                      f"예치 {ymd(rng[0])[5:]}~" if len(rng) > 1 else ""] if x))
     for r in ksd(tok, "meet"):
@@ -526,6 +527,8 @@ def main():
     if keep:
         print(f"지난 값 유지 {len(keep)}건:", sorted({(e['mk'], e['cat']) for e in keep}))
     ev = sorted(EV + keep, key=lambda e: (e["d"], -e["imp"], e["n"]))
+    real = [e["d"] for e in ev if e["n"] == "FOMC 의사록"]               # 실제 의사록 일정이 있으면 '통상 3주 뒤' 추정은 뺀다
+    ev = [e for e in ev if not (e.get("est") and "의사록" in e["n"] and any(abs((date.fromisoformat(e["d"]) - date.fromisoformat(r)).days) <= 4 for r in real))]
     uniq, seen = [], set()
     for e in ev:
         k = (e["d"], e["mk"], e["n"])
