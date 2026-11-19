@@ -199,9 +199,9 @@ def kr_ksd(tok, big):
         t, nm = g(r, "sht_cd"), g(r, "isin_name", "kor_isnm")
         amt, kind = num(g(r, "per_sto_divi_amt")), g(r, "divi_kind") or ""
         d = ymd(g(r, "record_date"))
-        if not (t and d):
+        if not (t and d) or t not in big:                     # ETF 분배금·소형주는 뺌(스크리너 종목만)
             continue
-        mc = (big.get(t) or ("", 0))[1]
+        mc = (big.get(t) or ("", 0, 0))[1]
         add(d, "kr", "div", f"{nm} 배당 기준일", 2 if mc >= 10000 else 1, tk=t,
             x=" · ".join(x for x in [kind.strip(), f"주당 {amt:,.0f}원" if amt else "", f"지급 {ymd(g(r, 'divi_pay_dt'))[5:]}" if ymd(g(r, 'divi_pay_dt')) else ""] if x))
     for r in ksd(tok, "pubOffer"):
@@ -222,6 +222,8 @@ def kr_ksd(tok, big):
         if not (t and d):
             continue
         q = num(g(r, "issue_stk_qty"))
+        if t not in big and not ("신규" in kind or "공모" in kind):      # 추가 상장은 스크리너 종목만
+            continue
         tot = num(g(r, "tot_issue_stk_qty"))
         pct = q / tot * 100 if q and tot else None
         if "신규" in kind or "공모" in kind:
@@ -230,17 +232,22 @@ def kr_ksd(tok, big):
             add(d, "kr", "cap", f"{nm} 추가 상장 {pct:.1f}%", 2 if pct >= 5 else 1, tk=t, x=f"{kind} · {q:,.0f}주")
     for r in ksd(tok, "mandDeposit"):
         t, nm = g(r, "sht_cd"), g(r, "isin_name", "kor_isnm")
-        d = ymd(g(r, "depo_end_dt", "rtrn_dt", "dpst_end_dt", "end_dt", "return_dt", "depo_date"))
+        rng = re.findall(r"\d{4}[./-]?\d{2}[./-]?\d{2}", str(g(r, "depo_date") or ""))   # "예치일 ~ 반환일"
+        d = ymd(rng[-1]) if rng else None
         q = num(g(r, "stk_qty", "depo_qty", "dpst_qty"))
         if not (t and d):
             continue
-        tot = num(g(r, "tot_issue_stk_qty", "tot_stk_qty"))
-        pct = q / tot * 100 if q and tot else None
-        add(d, "kr", "lock", f"{nm} 보호예수 해제", 2 if (pct or 0) >= 5 else 1, tk=t,
-            x=" · ".join(x for x in [f"{q:,.0f}주" if q else "", f"발행주식의 {pct:.1f}%" if pct else "", str(g(r, "depo_reason", "dpst_rson", "reason") or "")] if x))
+        _, mc, px = big.get(t) or ("", 0, 0)
+        sh = mc * 1e8 / px if mc and px else None                   # 상장주식수 추정(시총 ÷ 주가)
+        pct = q / sh * 100 if q and sh else None
+        val = q * px / 1e8 if q and px else None                    # 억원
+        why = str(g(r, "depo_reason", "dpst_rson", "reason") or "").strip(" -")
+        add(d, "kr", "lock", f"{nm} 보호예수 해제", 2 if (pct or 0) >= 3 or (val or 0) >= 100 else 1, tk=t,
+            x=" · ".join(x for x in [f"{q:,.0f}주" if q else "", f"상장주식의 약 {pct:.1f}%" if pct else "", f"약 {val:,.0f}억원" if val else "", why,
+                                     f"예치 {ymd(rng[0])[5:]}~" if len(rng) > 1 else ""] if x))
     for r in ksd(tok, "meet"):
         t, nm, d = g(r, "sht_cd"), g(r, "isin_name", "kor_isnm"), ymd(g(r, "gen_meet_dt"))
-        if t and d and (big.get(t) or ("", 0))[1] >= 3000:
+        if t and d and (big.get(t) or ("", 0, 0))[1] >= 3000:
             add(d, "kr", "meet", f"{nm} {g(r, 'gen_meet_type') or '주주총회'}", 1, tk=t, x=str(g(r, "agenda") or "")[:80])
     for r in ksd(tok, "paidin"):
         t, nm = g(r, "sht_cd"), g(r, "isin_name", "kor_isnm")
@@ -265,7 +272,6 @@ MACRO = [   # (나라, 정규식, 한국어 이름, 중요도)
     ("United States", r"^(Core )?CPI( m/m| y/y|)$|Consumer Price Index", "미국 소비자물가(CPI)", 3),
     ("United States", r"Nonfarm Payrolls|Non-Farm", "미국 고용보고서(비농업 고용)", 3),
     ("United States", r"Unemployment Rate", "미국 실업률", 3),
-    ("United States", r"Fed Interest Rate Decision|FOMC Statement|Federal Funds Rate", "FOMC 금리 결정", 3),
     ("United States", r"FOMC (Meeting )?Minutes", "FOMC 의사록", 2),
     ("United States", r"(Core )?PCE Price", "미국 PCE 물가", 3),
     ("United States", r"^GDP|Gross Domestic Product", "미국 GDP", 3),
@@ -308,18 +314,18 @@ def nasdaq(path, params):
 
 
 def to_kst(d, hhmm):
-    """나스닥 경제지표 시간은 GMT. 한국 시각(날짜가 넘어갈 수 있음)으로."""
+    """나스닥 경제지표 'gmt' 값은 실제로는 고정 UTC-5(서머타임 없는 미 동부 표준시). 한국 시각(+14시간)으로."""
     m = re.match(r"(\d{1,2}):(\d{2})", str(hhmm or ""))
     if not m:
         return None
-    t = datetime.strptime(d, "%Y-%m-%d").replace(hour=int(m.group(1)), minute=int(m.group(2)), tzinfo=timezone.utc).astimezone(KST)
+    t = datetime.strptime(d, "%Y-%m-%d").replace(hour=int(m.group(1)), minute=int(m.group(2)), tzinfo=timezone(timedelta(hours=-5))).astimezone(KST)
     return t.strftime("%m/%d %H:%M")
 
 
 def macro():
     n, hit, first, miss = 0, 0, True, 0
     d = D0
-    seen = set()
+    seen = {}
     while d <= D1:
         if d.weekday() < 5:
             j = nasdaq("calendar/economicevents", {"date": d.isoformat()})
@@ -343,13 +349,14 @@ def macro():
                     if c == cc and re.search(rx, ev, re.I):
                         key = (d.isoformat(), ko)
                         if key in seen:                     # 같은 지표 여러 줄(m/m·y/y) → 하나로, 세부는 덧붙임
-                            for e in EV[::-1]:
-                                if e["d"] == key[0] and e["n"] == ko:
-                                    e["x"] = (e.get("x", "") + " · " + ev + _val(r))[:240]
-                                    break
+                            if seen[key] is not None:
+                                seen[key]["x"] = (seen[key].get("x", "") + " · " + ev + _val(r))[:240]
                             break
-                        seen.add(key)
-                        add(d, CTRY.get(c, "gl"), "cb" if "금리" in ko or "FOMC" in ko else "macro", ko, imp, kst=to_kst(d.isoformat(), r.get("gmt")), x=ev + _val(r))
+                        kst = to_kst(d.isoformat(), r.get("gmt"))
+                        mk_ = CTRY.get(c, "gl")
+                        dd = d if mk_ == "us" or not kst else date(d.year + (kst[:2] == "01" and d.month == 12), int(kst[:2]), int(kst[3:5]))   # 미국 밖 일정은 한국 날짜에
+                        add(dd, mk_, "cb" if "금리" in ko or "FOMC" in ko else "macro", ko, imp, kst=kst, x=ev + _val(r))
+                        seen[key] = EV[-1] if EV and EV[-1]["n"] == ko else None
                         hit += 1
                         break
             time.sleep(0.25)
@@ -358,7 +365,7 @@ def macro():
 
 
 def _val(r):
-    a, c, p = (r.get("actual") or "").strip(), (r.get("consensus") or "").strip(), (r.get("previous") or "").strip()
+    a, c, p = ((r.get(k) or "").replace("&nbsp;", "").strip() for k in ("actual", "consensus", "previous"))
     s = [f"실제 {a}" if a and a not in ("-", "--") else "", f"예상 {c}" if c and c not in ("-", "--") else "", f"이전 {p}" if p and p not in ("-", "--") else ""]
     s = [x for x in s if x]
     return (" (" + ", ".join(s) + ")") if s else ""
@@ -476,7 +483,7 @@ def main():
     big = {}
     try:
         u = json.load(open(os.path.join(OUT, "universe_kr.json"), encoding="utf-8"))
-        big = {r["ticker"]: (r.get("name") or "", (r.get("mcap") or 0)) for r in u["rows"] if r.get("ticker")}
+        big = {r["ticker"]: (r.get("name") or "", (r.get("mcap") or 0), (r.get("price") or 0)) for r in u["rows"] if r.get("ticker") and not r.get("is_etf")}
     except Exception:
         pass
 
