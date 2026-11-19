@@ -352,8 +352,13 @@ def dart_earn(big):
         if first and txt:
             print("DART 문서 예시:", name, x["report_nm"], txt[:300])
             first = False
-        if kind == "ir" and not re.search(r"실적|결산|분기|반기", txt):
-            continue                                            # 실적과 무관한 IR(NDR·컨퍼런스)은 뺌
+        if kind == "ir":                                        # 실적 발표 IR 만(NDR·Corp Day·1:1 미팅·컨퍼런스 참가는 뺌)
+            pm = re.search(r"(?:개최\s*목적|목\s*적)\s*[:：]?\s*(.{0,90})", txt)
+            pur = pm.group(1) if pm else txt[:400]
+            earn_ir = re.search(r"([1-4]\s*/\s*4\s*분기|[1-4]\s*분기|반기|연간|결산|20\d\d\s*년|FY\s*\d{2,4}).{0,25}(경영\s*)?실적|실적\s*(발표|설명|공개)|경영\s*실적\s*(발표|설명)|earnings", pur, re.I)
+            meet = re.search(r"NDR|Non[- ]?Deal|Corp(orate)?\s*Day|1\s*:\s*1|One[- ]on[- ]One|소규모\s*(그룹\s*)?미팅|컨퍼런스\s*참|포럼|박람회", txt[:900], re.I)
+            if not earn_ir or (meet and not re.search(r"([1-4]\s*/\s*4\s*분기|[1-4]\s*분기|반기|연간|결산|20\d\d\s*년).{0,25}실적\s*(발표|설명)", pur)):
+                continue
         key = re.search(r"(개최\s*일시|일\s*시|일\s*자|예정\s*일시|공시\s*예정\s*일|예정일)", txt)
         seg = txt[key.start(): key.start() + 200] if key else txt
         d, tm = None, ""
@@ -371,14 +376,26 @@ def dart_earn(big):
         if not d:
             continue
         purpose = re.search(r"(?:개최\s*목적|목\s*적)\s*[:：]?\s*(.{0,60})", txt)
-        add(d, "kr", "earn", f"{name} 실적 발표" + (" · IR" if kind == "ir" else " 예정"), max(imp, 2), tk=sc, src="dart", conf=True,
+        call = kind == "ir" and re.search(r"컨퍼런스\s*콜|conference\s*call|어닝\s*콜|웹캐스트|webcast", txt, re.I)
+        add(d, "kr", "earn", f"{name} 실적 발표" + (" · 컨퍼런스콜" if call else " · 설명회" if kind == "ir" else " 예정"), max(imp, 2), tk=sc, src="dart", conf=True,
             kst=(d.strftime("%m/%d") + " " + tm) if tm else None,
             x=("기업설명회(IR) 공시" if kind == "ir" else "결산실적공시 예고") + (" · " + purpose.group(1).strip() if purpose else "") + f" · 공시 {rd.strftime('%m/%d')}")
         if kind == "ir":
             n_ir += 1
         else:
             n_pre += 1
-    LOG["dart_earn"] = f"IR {n_ir} · 예고 {n_pre} · 잠정실적 {n_done}"
+    # 같은 회사·같은 날은 하나로: 지난 날은 잠정실적, 앞으로는 IR(시각 있음) > 예고
+    rank = lambda e: (0 if "잠정실적" in e["n"] else 1 if "컨퍼런스콜" in e["n"] or "설명회" in e["n"] else 2)
+    best = {}
+    for e in [e for e in EV if e.get("src") == "dart"]:
+        k = (e["tk"], e["d"])
+        if k not in best or rank(e) < rank(best[k]):
+            if k in best and best[k].get("kst") and not e.get("kst"):
+                e["kst"] = best[k]["kst"]
+            best[k] = e
+    keep_ids = {id(e) for e in best.values()}
+    EV[:] = [e for e in EV if e.get("src") != "dart" or id(e) in keep_ids]
+    LOG["dart_earn"] = f"IR {n_ir} · 예고 {n_pre} · 잠정실적 {n_done} → {len(best)}건"
 
 
 # ───────────────────────── 미국·세계 경제지표(나스닥) ─────────────────────────
