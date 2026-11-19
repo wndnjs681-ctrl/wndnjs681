@@ -332,7 +332,7 @@ def macro():
     while d <= D1:
         if d.weekday() < 5:
             rows = []
-            for k in range(3):                              # 가끔 빈 응답 — 잠깐 쉬고 다시
+            for k in range(3 if (d - TODAY).days <= 21 else 1):   # 가끔 빈 응답 — 가까운 날만 다시
                 j = nasdaq("calendar/economicevents", {"date": d.isoformat()})
                 rows = ((j.get("data") or {}).get("rows")) or []
                 if rows or over():
@@ -344,8 +344,8 @@ def macro():
             n += 1
             if not rows:
                 miss += 1
-                if n >= 4 and hit == 0 and miss >= 4:
-                    print("나스닥 경제지표가 계속 비어 있음 — 중단")
+                if (n >= 4 and hit == 0 and miss >= 4) or (hit and miss >= 10 and d > TODAY):
+                    print(f"나스닥 경제지표 빈 날 {miss}일 연속 — 여기서 멈춤({d})")
                     break
             else:
                 miss = 0
@@ -413,7 +413,7 @@ def bls():
         if not ds:
             for y in sorted({D0.year, D1.year}):
                 try:
-                    r = requests.get("https://fred.stlouisfed.org/releases/calendar", params={"rid": rid, "y": y}, headers={"User-Agent": UA}, timeout=15)
+                    r = requests.get("https://fred.stlouisfed.org/releases/calendar", params={"rid": rid, "y": y}, headers={"User-Agent": UA}, timeout=8)
                     if r.status_code == 200:
                         ds |= _dates(r.text)
                         src = "FRED"
@@ -426,6 +426,25 @@ def bls():
             hh, mm = (10, 0) if code == "jolts" else (8, 30)
             add(d, "us", "macro", ko, imp, kst=et_kst(d, hh, mm), x=f"{what} · {src} 공식 발표 일정")
     LOG["bls"] = got
+    if not any(e["n"].startswith("미국 고용보고서") and e["d"] >= TODAY.isoformat() for e in EV):
+        nfp_rule()
+
+
+def nfp_rule():
+    """BLS 규칙: 기준 주간(12일이 든 일~토) 끝난 뒤 셋째 금요일. 연휴·정부 사정으로 바뀔 수 있어 '추정'으로 표시."""
+    m, n = D0.replace(day=1), 0
+    while m <= D1:
+        d12 = m.replace(day=12)
+        sat = d12 + timedelta(days=(5 - d12.weekday()) % 7)   # 12일이 든 주의 토요일
+        rel = sat + timedelta(days=20)
+        if rel in us_holidays(rel.year)[0]:                    # 휴일이면 다음 주 금요일로(예: 1월 1일)
+            rel += timedelta(days=7)
+        if not any(e["n"].startswith("미국 고용보고서") and abs((date.fromisoformat(e["d"]) - rel).days) <= 7 for e in EV):
+            add(rel, "us", "macro", "미국 고용보고서(비농업 고용)", 3, kst=et_kst(rel), est=True,
+                x=f"{m.month}월 고용 · BLS 규칙(기준 주간 종료 뒤 셋째 금요일)으로 계산한 날짜 — 바뀔 수 있음")
+            n += 1
+        m = (m + timedelta(days=32)).replace(day=1)
+    LOG["nfp_rule"] = n
 
 
 def _val(r):
@@ -574,7 +593,7 @@ def main():
         for d, n in early.items():
             add(d, "us", "holiday", n, 1)
 
-    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("경제지표", macro), ("BLS 일정", bls), ("미국 IPO", us_ipo)):
+    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("미국 IPO", us_ipo), ("경제지표", macro), ("BLS 일정", bls)):
         n0 = len(EV)
         try:
             fn()
