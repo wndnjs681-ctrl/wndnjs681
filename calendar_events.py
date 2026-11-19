@@ -352,12 +352,15 @@ def dart_earn(big):
         if first and txt:
             print("DART 문서 예시:", name, x["report_nm"], txt[:300])
             first = False
-        if kind == "ir":                                        # 실적 발표 IR 만(NDR·Corp Day·1:1 미팅·컨퍼런스 참가는 뺌)
-            pm = re.search(r"(?:개최\s*목적|목\s*적)\s*[:：]?\s*(.{0,90})", txt)
-            pur = pm.group(1) if pm else txt[:400]
-            earn_ir = re.search(r"([1-4]\s*/\s*4\s*분기|[1-4]\s*분기|반기|연간|결산|20\d\d\s*년|FY\s*\d{2,4}).{0,25}(경영\s*)?실적|실적\s*(발표|설명|공개)|경영\s*실적\s*(발표|설명)|earnings", pur, re.I)
-            meet = re.search(r"NDR|Non[- ]?Deal|Corp(orate)?\s*Day|1\s*:\s*1|One[- ]on[- ]One|소규모\s*(그룹\s*)?미팅|컨퍼런스\s*참|포럼|박람회", txt[:900], re.I)
-            if not earn_ir or (meet and not re.search(r"([1-4]\s*/\s*4\s*분기|[1-4]\s*분기|반기|연간|결산|20\d\d\s*년).{0,25}실적\s*(발표|설명)", pur)):
+        if kind == "ir":                                        # 실적 발표 IR 만(NDR·Corp Day·1:1·소규모 미팅은 뺌)
+            pm = re.search(r"(?:개최\s*목적|목\s*적)\s*[:：]?\s*(.*?)(?=\s\d\s*\.\s|$)", txt[:1500])
+            pur = (pm.group(1) if pm else "")[:120]
+            mm = re.search(r"(?:개최\s*방법|실시\s*방법)\s*[:：]?\s*(.*?)(?=\s\d\s*\.\s|$)", txt[:1500])
+            how = (mm.group(1) if mm else "")[:120]
+            q_earn = re.search(r"([1-4]\s*/\s*4\s*분기|[1-4]\s*분기|[1-4]Q|반기|연간|결산|20\d\d\s*년|'\d\d\s*년).{0,25}(경영\s*)?실적|실적\s*발표", pur, re.I)
+            release = re.search(r"컨퍼런스\s*콜|conference\s*call|웹\s*캐스|webcast|온라인|실적\s*발표|기업\s*설명회|프레젠테이션|자사\s*주관|대규모|화상", how, re.I)
+            meeting = re.search(r"NDR|Non[- ]?Deal|Corp(orate)?\s*Day|1\s*[:대\-]\s*1|One[- ]on[- ]One|소규모|그룹\s*미팅|대면\s*미팅|투자자\s*미팅|컨퍼런스\s*참|증권\s*주관|증권\s*주최", how + " " + pur, re.I)
+            if not (q_earn and release and not meeting):
                 continue
         key = re.search(r"(개최\s*일시|일\s*시|일\s*자|예정\s*일시|공시\s*예정\s*일|예정일)", txt)
         seg = txt[key.start(): key.start() + 200] if key else txt
