@@ -1,0 +1,46 @@
+name: calendar
+
+# 주요 일정 캘린더(대시보드 '일정' 탭) — 국내 예탁원 일정(한국투자증권)·휴장일·경제지표·FOMC·IPO·만기
+# 하루 세 번(한국 07:41 · 12:41 · 18:41) + 수동 실행. 결과는 output/market_index.json 의 "cal".
+on:
+  schedule:
+    - cron: "41 22 * * 0-4"
+    - cron: "41 3 * * 1-5"
+    - cron: "41 9 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-full
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet requests
+      - name: Market calendar (주요 일정)
+        env:
+          PYTHONUNBUFFERED: "1"
+          CAL_MIN_HOURS: "0"
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_APPKEY || secrets.APP_KEY || secrets.APPKEY || secrets.KIS_KEY || secrets.KIS_API_KEY || secrets.KOREA_INVEST_APP_KEY || secrets.HANTU_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_APPSECRET || secrets.APP_SECRET || secrets.APPSECRET || secrets.KIS_SECRET || secrets.KIS_API_SECRET || secrets.KOREA_INVEST_APP_SECRET || secrets.HANTU_APP_SECRET }}
+        run: python calendar_events.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/market_index.json
+          git diff --staged --quiet || git commit -m "calendar: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase --autostash || true
+          git push

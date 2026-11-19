@@ -26,6 +26,8 @@ KEY, SECRET = os.getenv("KIS_APP_KEY", "").strip(), os.getenv("KIS_APP_SECRET", 
 TODAY = datetime.now(KST).date()
 D0, D1 = TODAY - timedelta(days=BACK), TODAY + timedelta(days=AHEAD)
 EV, LOG = [], {}
+T0, BUDGET = time.time(), float(os.getenv("CAL_BUDGET", "720"))      # 전체 시간 상한(초) — 넘으면 남은 외부 조회는 건너뜀
+over = lambda: time.time() - T0 > BUDGET
 
 
 def add(d, mk, cat, n, imp=1, **kw):
@@ -293,9 +295,11 @@ CTRY = {"United States": "us", "South Korea": "kr"}
 
 
 def nasdaq(path, params):
-    for k in range(3):
+    if over():
+        return {}
+    for k in range(2):
         try:
-            r = requests.get("https://api.nasdaq.com/api/" + path, params=params, timeout=25,
+            r = requests.get("https://api.nasdaq.com/api/" + path, params=params, timeout=12,
                              headers={"User-Agent": UA, "Accept": "application/json, text/plain, */*", "Origin": "https://www.nasdaq.com", "Referer": "https://www.nasdaq.com/"})
             return r.json()
         except Exception as e:
@@ -313,7 +317,7 @@ def to_kst(d, hhmm):
 
 
 def macro():
-    n, hit, first = 0, 0, True
+    n, hit, first, miss = 0, 0, True, 0
     d = D0
     seen = set()
     while d <= D1:
@@ -324,6 +328,15 @@ def macro():
                 print("나스닥 경제지표 응답 예시:", rows[:2] if rows else str(j)[:300])
                 first = False
             n += 1
+            if not rows:
+                miss += 1
+                if n >= 4 and hit == 0 and miss >= 4:
+                    print("나스닥 경제지표가 계속 비어 있음 — 중단")
+                    break
+            else:
+                miss = 0
+            if n % 20 == 0:
+                print(f"  경제지표 {d} 까지 {n}일 · {hit}건 · {time.time() - T0:.0f}초", flush=True)
             for r in rows:
                 c, ev = (r.get("country") or "").strip(), re.sub(r"\s+", " ", (r.get("eventName") or "").strip())
                 for cc, rx, ko, imp in MACRO:
