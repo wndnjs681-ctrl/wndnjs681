@@ -33,6 +33,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           CAL_MIN_HOURS: "0"
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}      # 국내 실적 발표 일정(IR·실적 예고 공시)
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_APPKEY || secrets.APP_KEY || secrets.APPKEY || secrets.KIS_KEY || secrets.KIS_API_KEY || secrets.KOREA_INVEST_APP_KEY || secrets.HANTU_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_APPSECRET || secrets.APP_SECRET || secrets.APPSECRET || secrets.KIS_SECRET || secrets.KIS_API_SECRET || secrets.KOREA_INVEST_APP_SECRET || secrets.HANTU_APP_SECRET }}
         run: python calendar_events.py

@@ -268,6 +268,119 @@ def kr_ksd(tok, big):
             add(ld, "kr", "cap", f"{nm} 무상증자 신주 상장", 1, tk=t)
 
 
+# ───────────────────────── 국내 실적 발표(OpenDART 공시) ─────────────────────────
+DART_KEY = os.getenv("DART_API_KEY", "").strip()
+DPAT = re.compile(r"(20\d\d)\s*(?:년|[-./])\s*(\d{1,2})\s*(?:월|[-./])\s*(\d{1,2})\s*일?")
+
+
+def dart_doc_text(sess, rcept_no):
+    import io, zipfile
+    r = sess.get("https://opendart.fss.or.kr/api/document.xml", params={"crtfc_key": DART_KEY, "rcept_no": rcept_no}, timeout=20)
+    try:
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+    except zipfile.BadZipFile:
+        return ""
+    out = []
+    for n in z.namelist():
+        b = z.read(n)
+        for enc in ("utf-8", "euc-kr", "cp949"):
+            try:
+                out.append(b.decode(enc))
+                break
+            except UnicodeDecodeError:
+                continue
+    t = re.sub(r"<[^>]+>", " ", " ".join(out))
+    return re.sub(r"\s+", " ", t.replace("&nbsp;", " "))
+
+
+def dart_earn(big):
+    """기업설명회(IR) 개최 안내공시·결산실적공시 예고 → 확정된 실적 발표 일정, 영업(잠정)실적 공시 → 이미 발표한 날.
+    DART_API_KEY(저장소 Secrets) 필요."""
+    if not DART_KEY:
+        print("DART 키 없음 — 국내 실적 일정 건너뜀")
+        return
+    sess = requests.Session()
+    bgn, end = max(D0, TODAY - timedelta(days=45)), TODAY
+    rows, page, tot = [], 1, 1
+    while page <= tot and page <= 200 and not over():
+        try:
+            j = sess.get("https://opendart.fss.or.kr/api/list.json", timeout=20,
+                         params={"crtfc_key": DART_KEY, "bgn_de": bgn.strftime("%Y%m%d"), "end_de": end.strftime("%Y%m%d"),
+                                 "pblntf_ty": "I", "page_no": page, "page_count": 100}).json()
+        except Exception as e:
+            print("DART 목록:", type(e).__name__)
+            break
+        if j.get("status") not in ("000", "013"):
+            print("DART 목록:", j.get("status"), j.get("message"))
+            break
+        tot = int(j.get("total_page") or 1)
+        for x in j.get("list") or []:
+            nm = str(x.get("report_nm", ""))
+            if re.search(r"기업설명회|결산실적공시\s*예고|영업\(잠정\)실적|잠정\)?실적", nm):
+                rows.append(x)
+        page += 1
+        time.sleep(0.12)
+    print(f"DART 거래소공시 {page - 1}/{tot}쪽 · 실적 관련 {len(rows)}건")
+    # 회사별 최신 공시만(정정 공시가 뒤에 오면 그걸로)
+    latest = {}
+    for x in sorted(rows, key=lambda x: x.get("rcept_no", "")):
+        sc = str(x.get("stock_code") or "").strip()
+        if not sc:
+            continue
+        nm = x["report_nm"]
+        kind = "ir" if "기업설명회" in nm else "pre" if "예고" in nm else "done"
+        latest[(sc, kind, x["rcept_dt"] if kind == "done" else "")] = x
+    n_ir = n_pre = n_done = 0
+    first = True
+    for (sc, kind, _), x in latest.items():
+        name = x.get("corp_name") or sc
+        mc = (big.get(sc) or ("", 0, 0))[1]
+        imp = 2 if mc >= 10000 else 1
+        rd = datetime.strptime(x["rcept_dt"], "%Y%m%d").date()
+        if kind == "done":
+            add(rd, "kr", "earn", f"{name} 잠정실적 발표", imp, tk=sc, src="dart", conf=True, x="영업(잠정)실적 공시 — 이미 발표")
+            n_done += 1
+            continue
+        if over():
+            break
+        try:
+            txt = dart_doc_text(sess, x["rcept_no"])
+        except Exception as e:
+            print("DART 문서:", type(e).__name__)
+            continue
+        time.sleep(0.15)
+        if first and txt:
+            print("DART 문서 예시:", name, x["report_nm"], txt[:300])
+            first = False
+        if kind == "ir" and not re.search(r"실적|결산|분기|반기", txt):
+            continue                                            # 실적과 무관한 IR(NDR·컨퍼런스)은 뺌
+        key = re.search(r"(개최\s*일시|일\s*시|일\s*자|예정\s*일시|공시\s*예정\s*일|예정일)", txt)
+        seg = txt[key.start(): key.start() + 200] if key else txt
+        d, tm = None, ""
+        for m in DPAT.finditer(seg):
+            try:
+                c = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                continue
+            if rd - timedelta(days=1) <= c <= rd + timedelta(days=75):
+                d = c
+                t2 = re.search(r"(\d{1,2})\s*[:시]\s*(\d{2})?", seg[m.end(): m.end() + 25])
+                if t2:
+                    tm = f"{int(t2.group(1)):02d}:{(t2.group(2) or '00')}"
+                break
+        if not d:
+            continue
+        purpose = re.search(r"(?:개최\s*목적|목\s*적)\s*[:：]?\s*(.{0,60})", txt)
+        add(d, "kr", "earn", f"{name} 실적 발표" + (" · IR" if kind == "ir" else " 예정"), max(imp, 2), tk=sc, src="dart", conf=True,
+            kst=(d.strftime("%m/%d") + " " + tm) if tm else None,
+            x=("기업설명회(IR) 공시" if kind == "ir" else "결산실적공시 예고") + (" · " + purpose.group(1).strip() if purpose else "") + f" · 공시 {rd.strftime('%m/%d')}")
+        if kind == "ir":
+            n_ir += 1
+        else:
+            n_pre += 1
+    LOG["dart_earn"] = f"IR {n_ir} · 예고 {n_pre} · 잠정실적 {n_done}"
+
+
 # ───────────────────────── 미국·세계 경제지표(나스닥) ─────────────────────────
 MACRO = [   # (나라, 정규식, 한국어 이름, 중요도) — 위에서부터 처음 맞는 것
     ("United States", r"^(Core )?CPI\b(?! Index)|^Consumer Price Index", "미국 소비자물가(CPI)", 3),
@@ -619,7 +732,7 @@ def main():
         for d, n in early.items():
             add(d, "us", "holiday", n, 1)
 
-    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("미국 IPO", us_ipo), ("TE 지표 일정", te), ("경제지표", macro), ("고용보고서 규칙", nfp_check)):
+    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("국내 실적(DART)", lambda: dart_earn(big)), ("FOMC", fomc), ("미국 IPO", us_ipo), ("TE 지표 일정", te), ("경제지표", macro), ("고용보고서 규칙", nfp_check)):
         n0 = len(EV)
         try:
             fn()
