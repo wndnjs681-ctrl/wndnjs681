@@ -269,19 +269,19 @@ def kr_ksd(tok, big):
 
 
 # ───────────────────────── 미국·세계 경제지표(나스닥) ─────────────────────────
-MACRO = [   # (나라, 정규식, 한국어 이름, 중요도)
+MACRO = [   # (나라, 정규식, 한국어 이름, 중요도) — 위에서부터 처음 맞는 것
     ("United States", r"^(Core )?CPI( m/m| y/y|)$|Consumer Price Index", "미국 소비자물가(CPI)", 3),
-    ("United States", r"Nonfarm Payrolls|Non-Farm", "미국 고용보고서(비농업 고용)", 3),
+    ("United States", r"^(?!ADP).*(Non.?Farm Payrolls|Nonfarm Employment Change|Employment Situation)", "미국 고용보고서(비농업 고용)", 3),
     ("United States", r"Unemployment Rate", "미국 실업률", 3),
     ("United States", r"FOMC (Meeting )?Minutes", "FOMC 의사록", 2),
     ("United States", r"(Core )?PCE Price", "미국 PCE 물가", 3),
     ("United States", r"^GDP|Gross Domestic Product", "미국 GDP", 3),
-    ("United States", r"^(Core )?PPI|Producer Price", "미국 생산자물가(PPI)", 2),
+    ("United States", r"\bPPI\b|Producer Price", "미국 생산자물가(PPI)", 2),
     ("United States", r"(Core )?Retail Sales", "미국 소매판매", 2),
     ("United States", r"ISM Manufacturing PMI", "ISM 제조업 PMI", 2),
     ("United States", r"ISM (Non-Manufacturing|Services) PMI", "ISM 서비스업 PMI", 2),
     ("United States", r"JOLTS", "JOLTS 구인", 2),
-    ("United States", r"ADP Nonfarm|ADP Employment", "ADP 민간 고용", 1),
+    ("United States", r"^ADP", "ADP 민간 고용", 1),
     ("United States", r"Initial Jobless Claims", "신규 실업수당 청구", 1),
     ("United States", r"Michigan Consumer Sentiment", "미시간대 소비자심리", 1),
     ("United States", r"Durable Goods Orders", "내구재 주문", 1),
@@ -324,6 +324,8 @@ def to_kst(d, hhmm):
 
 
 def macro():
+    from collections import Counter
+    other = Counter()                                       # 못 맞춘 미국 지표 이름(진단용)
     n, hit, first, miss = 0, 0, True, 0
     d = D0
     seen = {}
@@ -351,6 +353,8 @@ def macro():
                 print(f"  경제지표 {d} 까지 {n}일 · {hit}건 · {time.time() - T0:.0f}초", flush=True)
             for r in rows:
                 c, ev = (r.get("country") or "").strip(), re.sub(r"\s+", " ", (r.get("eventName") or "").strip())
+                if c == "United States" and not any(c == cc and re.search(rx, ev, re.I) for cc, rx, _, _ in MACRO):
+                    other[ev] += 1
                 for cc, rx, ko, imp in MACRO:
                     if c == cc and re.search(rx, ev, re.I):
                         key = (d.isoformat(), ko)
@@ -368,6 +372,60 @@ def macro():
             time.sleep(0.25)
         d += timedelta(days=1)
     LOG["macro"] = f"{hit}건 / {n}일 조회"
+    print("나스닥 미국 지표 중 안 쓴 이름:", ", ".join(f"{k}({v})" for k, v in other.most_common(70)))
+
+
+# ───────────────────────── BLS 공식 발표 일정(고용보고서·CPI·PPI·JOLTS) ─────────────────────────
+BLS = [("empsit", 50, "미국 고용보고서(비농업 고용)", 3, "비농업 고용·실업률·임금"), ("cpi", 10, "미국 소비자물가(CPI)", 3, "헤드라인·근원 CPI"),
+       ("ppi", 46, "미국 생산자물가(PPI)", 2, "헤드라인·근원 PPI"), ("jolts", 192, "JOLTS 구인", 2, "구인·이직")]
+MON3 = {m: i + 1 for i, m in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
+
+
+def et_kst(d, hh=8, mm=30):
+    dst = nth_wd(d.year, 3, 6, 2) <= d < nth_wd(d.year, 11, 6, 1)
+    return (datetime(d.year, d.month, d.day, hh, mm) + timedelta(hours=13 if dst else 14)).strftime("%m/%d %H:%M")
+
+
+def _dates(txt):
+    out = set()
+    for mo, dd, yy in re.findall(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})", txt):
+        try:
+            out.add(date(int(yy), MON3[mo], int(dd)))
+        except ValueError:
+            pass
+    return out
+
+
+def bls():
+    """BLS 지표별 발표 일정 페이지 → 안 되면 FRED 발표 달력. 08:30(미 동부) 발표, JOLTS 는 10:00."""
+    H = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.bls.gov/"}
+    got = {}
+    for code, rid, ko, imp, what in BLS:
+        ds, src = set(), ""
+        for url in (f"https://www.bls.gov/schedule/news_release/{code}.htm",):
+            try:
+                r = requests.get(url, headers=H, timeout=15)
+                if r.status_code == 200:
+                    ds, src = _dates(r.text), "BLS"
+                print(f"[BLS {code}] {r.status_code} · 날짜 {len(ds)}개")
+            except Exception as e:
+                print(f"[BLS {code}] {type(e).__name__}")
+        if not ds:
+            for y in sorted({D0.year, D1.year}):
+                try:
+                    r = requests.get("https://fred.stlouisfed.org/releases/calendar", params={"rid": rid, "y": y}, headers={"User-Agent": UA}, timeout=15)
+                    if r.status_code == 200:
+                        ds |= _dates(r.text)
+                        src = "FRED"
+                    print(f"[FRED rid={rid} {y}] {r.status_code} · 누적 {len(ds)}개")
+                except Exception as e:
+                    print(f"[FRED rid={rid}] {type(e).__name__}")
+        ds = {d for d in ds if D0 <= d <= D1 and d.weekday() < 5}
+        got[code] = f"{len(ds)}({src or '실패'})"
+        for d in sorted(ds):
+            hh, mm = (10, 0) if code == "jolts" else (8, 30)
+            add(d, "us", "macro", ko, imp, kst=et_kst(d, hh, mm), x=f"{what} · {src} 공식 발표 일정")
+    LOG["bls"] = got
 
 
 def _val(r):
@@ -516,7 +574,7 @@ def main():
         for d, n in early.items():
             add(d, "us", "holiday", n, 1)
 
-    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("경제지표", macro), ("미국 IPO", us_ipo)):
+    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("경제지표", macro), ("BLS 일정", bls), ("미국 IPO", us_ipo)):
         n0 = len(EV)
         try:
             fn()
