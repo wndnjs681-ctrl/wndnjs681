@@ -26,7 +26,7 @@ KEY, SECRET = os.getenv("KIS_APP_KEY", "").strip(), os.getenv("KIS_APP_SECRET", 
 TODAY = datetime.now(KST).date()
 D0, D1 = TODAY - timedelta(days=BACK), TODAY + timedelta(days=AHEAD)
 EV, LOG = [], {}
-T0, BUDGET = time.time(), float(os.getenv("CAL_BUDGET", "720"))      # 전체 시간 상한(초) — 넘으면 남은 외부 조회는 건너뜀
+T0, BUDGET = time.time(), float(os.getenv("CAL_BUDGET", "900"))      # 전체 시간 상한(초) — 넘으면 남은 외부 조회는 건너뜀
 over = lambda: time.time() - T0 > BUDGET
 
 
@@ -270,20 +270,20 @@ def kr_ksd(tok, big):
 
 # ───────────────────────── 미국·세계 경제지표(나스닥) ─────────────────────────
 MACRO = [   # (나라, 정규식, 한국어 이름, 중요도) — 위에서부터 처음 맞는 것
-    ("United States", r"^(Core )?CPI( m/m| y/y|)$|Consumer Price Index", "미국 소비자물가(CPI)", 3),
+    ("United States", r"^(Core )?CPI\b(?! Index)|^Consumer Price Index", "미국 소비자물가(CPI)", 3),
     ("United States", r"^(?!ADP).*(Non.?Farm Payrolls|Nonfarm Employment Change|Employment Situation)", "미국 고용보고서(비농업 고용)", 3),
-    ("United States", r"Unemployment Rate", "미국 실업률", 3),
+    ("United States", r"^Unemployment Rate", "미국 고용보고서(비농업 고용)", 3),
     ("United States", r"FOMC (Meeting )?Minutes", "FOMC 의사록", 2),
     ("United States", r"(Core )?PCE Price", "미국 PCE 물가", 3),
     ("United States", r"^GDP|Gross Domestic Product", "미국 GDP", 3),
     ("United States", r"\bPPI\b|Producer Price", "미국 생산자물가(PPI)", 2),
     ("United States", r"(Core )?Retail Sales", "미국 소매판매", 2),
     ("United States", r"ISM Manufacturing PMI", "ISM 제조업 PMI", 2),
-    ("United States", r"ISM (Non-Manufacturing|Services) PMI", "ISM 서비스업 PMI", 2),
+    ("United States", r"ISM (Non-Manufacturing|Services|N-Mfg) PMI", "ISM 서비스업 PMI", 2),
     ("United States", r"JOLTS", "JOLTS 구인", 2),
     ("United States", r"^ADP", "ADP 민간 고용", 1),
-    ("United States", r"Initial Jobless Claims", "신규 실업수당 청구", 1),
-    ("United States", r"Michigan Consumer Sentiment", "미시간대 소비자심리", 1),
+    ("United States", r"Initial Jobless Cl", "신규 실업수당 청구", 1),
+    ("United States", r"Michigan Consumer Sentiment|U Mich Sentiment", "미시간대 소비자심리", 1),
     ("United States", r"Durable Goods Orders", "내구재 주문", 1),
     ("United States", r"(Fed Chair|Powell).*(Speaks|Testifies)", "연준 의장 발언", 2),
     ("South Korea", r"Interest Rate Decision|Base Rate", "한국은행 금통위 기준금리 결정", 3),
@@ -375,6 +375,67 @@ def macro():
     print("나스닥 미국 지표 중 안 쓴 이름:", ", ".join(f"{k}({v})" for k, v in other.most_common(70)))
 
 
+# ───────────────────────── 야후 파이낸스 경제 캘린더(주 단위) ─────────────────────────
+YCTRY = {"US": "United States", "KR": "South Korea", "CN": "China", "JP": "Japan", "EU": "Euro Zone", "EZ": "Euro Zone", "EMU": "Euro Zone"}
+YROW = re.compile(r'\["([^"\]]+)","([A-Z]{2,3})","(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)","([^"]*)",(null|"[^"]*"),(null|"[^"]*"),(null|"[^"]*"),(null|"[^"]*")\]')
+
+
+def yahoo_econ():
+    H = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9"}
+    wk = D0 - timedelta(days=D0.weekday() + 1)              # 일요일 시작
+    seen, hit, pages, ymerge = {}, 0, 0, {}
+    while wk <= D1 and not over():
+        we = wk + timedelta(days=6)
+        new_tot = 0
+        for off in range(0, 600, 100):
+            try:
+                r = requests.get("https://finance.yahoo.com/calendar/economic", headers=H, timeout=15,
+                                 params={"from": wk.isoformat(), "to": we.isoformat(), "day": wk.isoformat(), "offset": off, "size": 100})
+                txt = r.text.replace('\\\\"', '"').replace('\\"', '"')
+            except Exception as e:
+                print(f"[야후 {wk}] {type(e).__name__}")
+                break
+            pages += 1
+            rows = YROW.findall(txt)
+            new = 0
+            for nm, cc, ts, per, act, exp, pri, rev in rows:
+                k = (nm, cc, ts)
+                if k in seen:
+                    continue
+                seen[k] = 1
+                new += 1
+                c = YCTRY.get(cc)
+                if not c:
+                    continue
+                for c2, rx, ko, imp in MACRO:
+                    if c2 == c and re.search(rx, nm, re.I):
+                        t = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                        et = t.astimezone(timezone(timedelta(hours=-4 if nth_wd(t.year, 3, 6, 2) <= t.date() < nth_wd(t.year, 11, 6, 1) else -5)))
+                        kt = t.astimezone(KST)
+                        mk_ = CTRY.get(c, "gl")
+                        q = lambda v: v.strip('"') if v != "null" else ""
+                        val = ", ".join(x for x in [f"예상 {q(exp)}" if q(exp) else "", f"이전 {q(pri)}" if q(pri) else "", f"실제 {q(act)}" if q(act) else ""] if x)
+                        dd = et.date() if mk_ == "us" else kt.date()
+                        xx = f"{nm}{' (' + per + ')' if per else ''}{' · ' + val if val else ''}"
+                        if (dd, ko) in ymerge:                      # 같은 날 같은 지표(헤드라인·근원 등)는 한 줄로
+                            ymerge[(dd, ko)]["x"] = (ymerge[(dd, ko)]["x"] + " / " + xx)[:260]
+                            break
+                        add(dd, mk_, "cb" if "금리" in ko else "macro", ko, imp, kst=kt.strftime("%m/%d %H:%M"), x=xx)
+                        if EV and EV[-1]["n"] == ko:
+                            ymerge[(dd, ko)] = EV[-1]
+                        hit += 1
+                        break
+            new_tot += new
+            if len(rows) < 100 or not new:                   # 마지막 쪽
+                break
+            time.sleep(0.4)
+        if wk <= TODAY <= we or pages <= 2:
+            print(f"[야후 {wk}~{we}] {new_tot}줄 · 누적 {hit}건")
+        wk += timedelta(days=7)
+        time.sleep(0.4)
+    LOG["yahoo"] = f"{hit}건 / {pages}쪽"
+
+
 # ───────────────────────── BLS 공식 발표 일정(고용보고서·CPI·PPI·JOLTS) ─────────────────────────
 BLS = [("empsit", 50, "미국 고용보고서(비농업 고용)", 3, "비농업 고용·실업률·임금"), ("cpi", 10, "미국 소비자물가(CPI)", 3, "헤드라인·근원 CPI"),
        ("ppi", 46, "미국 생산자물가(PPI)", 2, "헤드라인·근원 PPI"), ("jolts", 192, "JOLTS 구인", 2, "구인·이직")]
@@ -397,7 +458,7 @@ def _dates(txt):
 
 
 def bls():
-    """BLS 지표별 발표 일정 페이지 → 안 되면 FRED 발표 달력. 08:30(미 동부) 발표, JOLTS 는 10:00."""
+    """BLS 지표별 발표 일정 페이지(액션 IP 는 403 이 많음). 08:30(미 동부) 발표, JOLTS 는 10:00."""
     H = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.bls.gov/"}
     got = {}
     for code, rid, ko, imp, what in BLS:
@@ -410,16 +471,6 @@ def bls():
                 print(f"[BLS {code}] {r.status_code} · 날짜 {len(ds)}개")
             except Exception as e:
                 print(f"[BLS {code}] {type(e).__name__}")
-        if not ds:
-            for y in sorted({D0.year, D1.year}):
-                try:
-                    r = requests.get("https://fred.stlouisfed.org/releases/calendar", params={"rid": rid, "y": y}, headers={"User-Agent": UA}, timeout=8)
-                    if r.status_code == 200:
-                        ds |= _dates(r.text)
-                        src = "FRED"
-                    print(f"[FRED rid={rid} {y}] {r.status_code} · 누적 {len(ds)}개")
-                except Exception as e:
-                    print(f"[FRED rid={rid}] {type(e).__name__}")
         ds = {d for d in ds if D0 <= d <= D1 and d.weekday() < 5}
         got[code] = f"{len(ds)}({src or '실패'})"
         for d in sorted(ds):
@@ -593,7 +644,7 @@ def main():
         for d, n in early.items():
             add(d, "us", "holiday", n, 1)
 
-    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("미국 IPO", us_ipo), ("경제지표", macro), ("BLS 일정", bls)):
+    for step, fn in (("국내 예탁원", lambda: kr_ksd(tok, big) if tok else None), ("FOMC", fomc), ("미국 IPO", us_ipo), ("야후 경제지표", yahoo_econ), ("경제지표", macro), ("BLS 일정", bls)):
         n0 = len(EV)
         try:
             fn()
