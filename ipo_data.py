@@ -41,7 +41,7 @@ SEC_RULES = [(r"biotech|pharma|drug|therapeut|biolog|bio", "바이오"), (r"heal
              (r"bank|insur|capital|financ|credit|asset|blank check|shell|acquisition|reit|invest", "금융"),
              (r"real estate|property|reit", "부동산"), (r"oil|gas|energy|solar|uranium|nuclear|mining|metal|chemical|material|steel|utilit|power", "에너지·소재"),
              (r"aerospace|defense|industrial|machinery|construct|engineer|transport|logistic|airline|electrical equip|robot", "산업재·방산"),
-             (r"software|semicon|technolog|internet|comput|data|cloud|electronic|it serv|artificial|ai\b", "테크"),
+             (r"software|semicon|technolog|internet|comput|data|cloud|electronic|it serv|artificial|ai\b|anthropic|openai|xai\b", "테크"),
              (r"media|telecom|communic|entertain|advertis|game", "미디어·통신"),
              (r"retail|consumer|food|beverage|apparel|restaurant|leisure|auto|household|cosmetic|education", "소비재")]
 
@@ -98,6 +98,9 @@ def nasdaq(path, params):
     return {}
 
 
+WATCH = {}
+
+
 def us_new():
     out, m = {}, START.replace(day=1)
     while m <= TODAY:
@@ -124,9 +127,18 @@ def us_new():
                 print("앤트로픽 행:", r)
         up = data.get("upcoming") or {}
         urows = ((up.get("upcomingTable") or {}).get("rows") if isinstance(up, dict) else None) or []
-        for r in urows:
-            if "ANTHROPIC" in (r.get("companyName") or "").upper():
-                print("앤트로픽(예정) 행:", r)
+        for r in urows:                                         # 상장 예정 → 감시 목록(상장 뒤 나스닥 표에서 빠지는 경우가 있어 기억해 둔다)
+            t = (r.get("proposedTickerSymbol") or "").strip().upper()
+            try:
+                d = datetime.strptime(r.get("expectedPriceDate") or "", "%m/%d/%Y").date()
+            except ValueError:
+                continue
+            nm = (r.get("companyName") or t).strip()
+            if t and not re.search(r"acquisition|spac|merger", nm, re.I):
+                px = [num(x) for x in re.findall(r"[\d.]+", str(r.get("proposedSharePrice") or ""))]
+                px = [x for x in px if x]
+                WATCH[t] = {"t": t, "n": nm, "d": d.isoformat(), "op": round(sum(px) / len(px), 2) if px else None,
+                            "usd": num(r.get("dollarValueOfSharesOffered")), "ex": r.get("proposedExchange")}
         time.sleep(0.4)
         m = (m + timedelta(days=32)).replace(day=1)
     print(f"[US] 나스닥 priced {len(out)}건(스팩 제외)")
@@ -208,7 +220,23 @@ def main():
     us, kr = keep(base.get("us", [])), keep(base.get("kr", []))
 
     # 미국
+    for w in base.get("watch", []):
+        WATCH.setdefault(w["t"], w)
     new_us = us_new()
+    for t, w in list(WATCH.items()):
+        if w["d"] < START.isoformat() or w["d"] < (TODAY - timedelta(days=30)).isoformat():
+            WATCH.pop(t)
+            continue
+        if t in new_us or t in us or w["d"] > TODAY.isoformat():
+            continue
+        r = {"c": t, "n": w["n"], "m": "US", "d": w["d"], "op": w.get("op"), "o1": None, "c1": None,
+             "raise_": round(w["usd"] / 1e6) if w.get("usd") else None, "comp": None, "lock": None, "fl": None, "uw": None, "src": "nasdaq-upcoming", "ex": w.get("ex")}
+        if attach(r) and r["sd"].split(",")[0] >= w["d"][2:].replace("-", ""):   # 상장일 이후 시세가 실제로 있으면 상장 확인
+            new_us[t] = r
+            print("감시 목록에서 상장 확인:", t, w["n"], w["d"], "첫날", r.get("o1"), r.get("c1"))
+            r.pop("sx", None)
+        else:
+            print("감시 목록: 아직 시세 없음", t, w["d"])
     ind = us_industry() if new_us else {}
     uu = {}
     try:
@@ -261,11 +289,27 @@ def main():
     print(f"시세 {ok}/{len(us) + len(kr)}종목")
     out = {"v": 1, "asof": TODAY.isoformat(), "built": datetime.now(KST).strftime("%Y-%m-%dT%H:%M+09:00"),
            "note": "자동 갱신: 미국 나스닥 IPO 캘린더·국내 한국투자증권 공모 일정(예탁원), 시세 FinanceDataReader. 기관경쟁률·확약·유통물량은 9월 스냅샷 종목만",
-           "kr": sorted(kr.values(), key=lambda r: r["d"], reverse=True), "us": sorted(us.values(), key=lambda r: r["d"], reverse=True), "upcoming": up}
+           "kr": sorted(kr.values(), key=lambda r: r["d"], reverse=True), "us": sorted(us.values(), key=lambda r: r["d"], reverse=True), "upcoming": up,
+           "watch": sorted(WATCH.values(), key=lambda w: w["d"])}
     json.dump(out, open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     mp = os.path.join(OUT, "market_index.json")
     mi = json.load(open(mp, encoding="utf-8"))
     mi["ipo"] = out
+    cal = mi.get("cal") or {}
+    if cal.get("ev") is not None:                               # 일정 탭: 최근 상장이 빠져 있으면 넣는다
+        rng = cal.get("range") or ["0000", "9999"]
+        have = {(e.get("tk"), e.get("mk")) for e in cal["ev"] if e.get("cat") == "ipo"}
+        add = 0
+        for mk, L in (("us", out["us"]), ("kr", out["kr"])):
+            for r in L:
+                if rng[0] <= r["d"] <= rng[1] and (r["c"], mk) not in have:
+                    pxs = f"공모가 ${r['op']:.2f}" if mk == "us" and r.get("op") else f"공모가 {r['op']:,.0f}원" if r.get("op") else ""
+                    first = f"첫날 종가 {'$' if mk == 'us' else ''}{r['c1']:,}" if r.get("c1") else ""
+                    cal["ev"].append({"d": r["d"], "mk": mk, "cat": "ipo", "n": f"{r['n']} 상장", "imp": 3 if (r.get("raise_") or 0) >= 5000 else 2 if (r.get("raise_") or 0) >= 300 or mk == "kr" else 1,
+                                      "tk": r["c"], "x": " · ".join(x for x in [r.get("ex") or "", pxs, first, f"규모 ${r['raise_']:,}M" if mk == "us" and r.get("raise_") else ""] if x)})
+                    add += 1
+        cal["ev"].sort(key=lambda e: (e["d"], -e.get("imp", 1), e["n"]))
+        print(f"일정 탭에 상장 {add}건 보강")
     json.dump(mi, open(mp, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print(f"→ {p} · 국내 {len(kr)} · 미국 {len(us)} · 예정 {len(up)} · 최근 미국 {[(r['n'], r['d']) for r in out['us'][:5]]}")
 
