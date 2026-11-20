@@ -1,6 +1,6 @@
 name: calendar
 
-# 주요 일정 캘린더(대시보드 '일정' 탭) — 국내 예탁원 일정(한국투자증권)·휴장일·경제지표·FOMC·IPO·만기
+# 주요 일정 캘린더(대시보드 '일정' 탭)·Post-IPO 신규 상장 자료 — 국내 예탁원 일정(한국투자증권)·휴장일·경제지표·FOMC·IPO·만기
 # 하루 세 번(한국 07:41 · 12:41 · 18:41) + 수동 실행. 결과는 output/market_index.json 의 "cal".
 on:
   schedule:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install deps
-        run: pip install --quiet requests
+        run: pip install --quiet requests finance-datareader pandas
       - name: Market calendar (주요 일정)
         env:
           PYTHONUNBUFFERED: "1"
@@ -37,11 +37,18 @@ jobs:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_APPKEY || secrets.APP_KEY || secrets.APPKEY || secrets.KIS_KEY || secrets.KIS_API_KEY || secrets.KOREA_INVEST_APP_KEY || secrets.HANTU_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_APPSECRET || secrets.APP_SECRET || secrets.APPSECRET || secrets.KIS_SECRET || secrets.KIS_API_SECRET || secrets.KOREA_INVEST_APP_SECRET || secrets.HANTU_APP_SECRET }}
         run: python calendar_events.py
+      - name: Post-IPO data (신규 상장)
+        continue-on-error: true
+        env:
+          PYTHONUNBUFFERED: "1"
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY || secrets.KIS_APPKEY || secrets.APP_KEY || secrets.APPKEY || secrets.KIS_KEY || secrets.KIS_API_KEY || secrets.KOREA_INVEST_APP_KEY || secrets.HANTU_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET || secrets.KIS_APPSECRET || secrets.APP_SECRET || secrets.APPSECRET || secrets.KIS_SECRET || secrets.KIS_API_SECRET || secrets.KOREA_INVEST_APP_SECRET || secrets.HANTU_APP_SECRET }}
+        run: python ipo_data.py
       - name: Commit
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add output/market_index.json
+          git add output/market_index.json output/ipo.json
           git diff --staged --quiet || git commit -m "calendar: $(date -u +%Y-%m-%d\ %H:%M) UTC"
           git pull --rebase --autostash || true
           git push
