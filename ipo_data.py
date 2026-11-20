@@ -277,6 +277,23 @@ def main():
         if up_new or not any(u.get("d", "") > TODAY.isoformat() for u in up):
             up = sorted(up_new, key=lambda u: u["d"])
 
+    # 업종 비어 있는 미국 종목: 나스닥 회사 개요(Sector·Industry)
+    nfix = 0
+    for r in us.values():
+        if r.get("sec") not in (None, "", "미분류"):
+            continue
+        j = nasdaq(f"company/{r['c']}/company-profile", {})
+        d = j.get("data") or {}
+        sec_ = ((d.get("Sector") or {}).get("value") or "") if isinstance(d.get("Sector"), dict) else ""
+        ind_ = ((d.get("Industry") or {}).get("value") or "") if isinstance(d.get("Industry"), dict) else ""
+        desc = ((d.get("CompanyDescription") or {}).get("value") or "") if isinstance(d.get("CompanyDescription"), dict) else ""
+        if sec_ or ind_ or desc:
+            r["ind"] = ind_ or r.get("ind")
+            r["sec"] = sec_of(f"{ind_} {sec_} {r['n']}") if (ind_ or sec_) else sec_of(desc[:300] + " " + r["n"])
+            nfix += r["sec"] != "미분류"
+        time.sleep(0.25)
+    print(f"[US] 업종 보강 {nfix}건")
+
     # 시세 붙이기
     ok = 0
     for L in (us, kr):
