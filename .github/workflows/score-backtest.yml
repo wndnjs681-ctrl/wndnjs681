@@ -1,0 +1,45 @@
+name: score-backtest
+
+# 점수 백테스트(종목 진단 점수를 과거 매주 다시 계산해 그 뒤 수익률과 비교) — 매주 토요일 08:13 KST + 수동.
+# 결과는 output/score_bt.json 과 market_index.json 의 "sbt"(대시보드 동기화가 옮김).
+on:
+  schedule:
+    - cron: "13 23 * * 5"
+  workflow_dispatch:
+    inputs:
+      markets:
+        description: "시장 (us, kr, 또는 us,kr)"
+        default: "us,kr"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-full
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet finance-datareader pandas numpy requests
+      - name: Score backtest
+        env:
+          PYTHONUNBUFFERED: "1"
+          MARKETS: ${{ github.event.inputs.markets || 'us,kr' }}
+        run: python score_backtest.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/score_bt.json output/market_index.json
+          git diff --staged --quiet || git commit -m "score-backtest: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase --autostash || true
+          git push
