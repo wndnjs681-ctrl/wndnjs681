@@ -112,8 +112,11 @@ def earn_revenue(E):
         except Exception as e:
             c["err"] = type(e).__name__
         for k in ("rev_est", "rev_lo", "rev_hi", "rev"):
-            if c.get(k) is not None:
-                r[k] = round(c[k])
+            v = c.get(k)
+            if isinstance(v, (int, float)) and v == v and abs(v) != float("inf"):
+                r[k] = round(v)
+            else:
+                c.pop(k, None)
         if r.get("rev") and r.get("rev_est"):
             r["rsur"] = round((r["rev"] / r["rev_est"] - 1) * 100, 2)
         time.sleep(0.25)
@@ -130,8 +133,11 @@ YAH = {"DGS10": "^TNX", "DGS2": "2YY=F", "DCOILWTICO": "CL=F", "DTWEXBGS": "DX-Y
 YNAME = {"DTWEXBGS": "달러지수(DXY)", "DFEDTARU": "미 3개월물 금리", "BAMLH0A0HYM2": "하이일드 채권 ETF(HYG)"}
 
 
+FRED_OK = [True]
+
+
 def fred(sid):
-    for k in range(2):
+    for k in range(2 if FRED_OK[0] else 0):
         try:
             r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv", params={"id": sid, "cosd": (date.today() - timedelta(days=400)).isoformat()},
                              headers={"User-Agent": UA}, timeout=20)
@@ -146,6 +152,8 @@ def fred(sid):
                     return pts, "FRED"
         except Exception as e:
             print("FRED", sid, type(e).__name__)
+            FRED_OK[0] = False                                   # 한 번 막히면 나머지는 바로 야후로
+            break
         time.sleep(1 + k)
     ys = YAH.get(sid)
     if ys:
