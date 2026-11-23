@@ -1,0 +1,42 @@
+name: us-extra
+
+# 미국 실적 일정·매크로 지표·미국 전 종목·소식 피드 — 하루 세 번(한국 06:35 · 12:35 · 21:35, 대시보드 동기화 07:00 전 포함) + 수동
+on:
+  schedule:
+    - cron: "35 21 * * 0-4"
+    - cron: "35 3 * * 1-5"
+    - cron: "35 12 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-full
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet requests
+      - name: US extra
+        env:
+          PYTHONUNBUFFERED: "1"
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: python us_extra.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/market_index.json
+          git diff --staged --quiet || git commit -m "us-extra: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase --autostash || true
+          git push
