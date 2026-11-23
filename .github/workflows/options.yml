@@ -1,0 +1,40 @@
+name: options
+
+# 옵션 데스크(CBOE 지연 시세 옵션 체인) — 미국 장 마감 뒤(한국 06:20, 대시보드 동기화 07:00 전) + 장중 1회(한국 02:20) + 수동
+on:
+  schedule:
+    - cron: "20 21 * * 1-5"
+    - cron: "20 17 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-full
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet requests finance-datareader pandas
+      - name: Options
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python options_data.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/market_index.json output/options_hist.json
+          git diff --staged --quiet || git commit -m "options: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase --autostash || true
+          git push
