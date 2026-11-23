@@ -251,8 +251,9 @@ def analyze(t, J, px_df):
         step = diffs[len(diffs) // 2] if diffs else None
     want = 40
     if step and kk and (kk[-1] - kk[0]) / step > want:
-        mult = math.ceil((kk[-1] - kk[0]) / step / want)
-        step *= mult
+        raw = (kk[-1] - kk[0]) / want
+        nice = [x * 10 ** e for e in range(-2, 5) for x in (1, 2, 2.5, 5)]
+        step = next((x for x in sorted(nice) if x >= raw and x >= step), step * math.ceil(raw / step))   # 5·10·25·50·100 같은 깔끔한 간격
     bucket = (lambda k: round(round(k / step) * step, 4)) if step else (lambda k: k)
     strikes = {}
     for k, (co, po, cvv, pvv) in oik.items():
