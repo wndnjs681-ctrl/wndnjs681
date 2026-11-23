@@ -468,7 +468,13 @@ def main():
         print("옵션 자료를 하나도 못 받음 — 기존 값 유지")
         return
     # 기록·평소 대비·IV 순위
-    day = datetime.now(ET).strftime("%Y-%m-%d") if datetime.now(ET).hour >= 16 else (datetime.now(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+    dd = datetime.now(ET).date() if datetime.now(ET).hour >= 16 else datetime.now(ET).date() - timedelta(days=1)
+    while dd.weekday() >= 5:                                  # 주말이면 금요일 장
+        dd -= timedelta(days=1)
+    day = dd.isoformat()
+    for k_, H_ in list(hist.items()):                         # 예전에 잘못 쌓인 주말 기록 정리
+        if isinstance(H_, list):
+            H_[:] = [h for h in H_ if datetime.strptime(h["d"], "%Y-%m-%d").weekday() < 5]
     for t, a in res.items():
         H = hist.setdefault(t, [])
         rec = {"d": day, "cs": a["cshare"], "iv": a["iv30"], "atm": a["atm"], "px": a["px"], "prem": a["cprem"] + a["pprem"], "pc": round(a["pv"] / a["cv"], 2) if a["cv"] else None, "g": a["net_g"]}
