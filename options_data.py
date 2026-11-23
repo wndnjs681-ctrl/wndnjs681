@@ -151,7 +151,8 @@ def analyze(t, J, px_df):
     exps = sorted({r["exp"] for r in rows})
     dte = lambda e: max((e - today).days, 0)
     # ── 거래량·거래대금 ──
-    flow = [r for r in rows if abs(r["k"] / S - 1) <= 0.2]     # 깊은 내가격(스프레드·박스 거래)이 거래대금을 부풀리지 않게 ±20% 안만
+    okflow = lambda r: abs(r["k"] / S - 1) <= 0.2 and (r["delta"] is None or abs(r["delta"]) <= 0.85)
+    flow = [r for r in rows if okflow(r)]                     # 깊은 내가격(|델타|>0.85 — 스프레드·박스 거래)은 거래대금에서 뺌
     cv = sum(r["vol"] for r in flow if r["cp"] == "C"); pv = sum(r["vol"] for r in flow if r["cp"] == "P")
     cprem = sum(r["vol"] * r["px"] * 100 for r in flow if r["cp"] == "C"); pprem = sum(r["vol"] * r["px"] * 100 for r in flow if r["cp"] == "P")
     coi = sum(r["oi"] for r in rows if r["cp"] == "C"); poi = sum(r["oi"] for r in rows if r["cp"] == "P")
@@ -314,7 +315,7 @@ def analyze(t, J, px_df):
     unusual = []
     for r in rows:
         prem = r["vol"] * r["px"] * 100
-        if prem < 1e6 or r["vol"] < 500 or abs(r["k"] / S - 1) > 0.2 or not r["iv"]:
+        if prem < 1e6 or r["vol"] < 500 or not okflow(r) or not r["iv"]:
             continue
         ratio = r["vol"] / r["oi"] if r["oi"] > 0 else 99
         lvl = 3 if prem >= 2e7 or (ratio >= 10 and prem >= 5e6) else 2 if prem >= 5e6 or ratio >= 5 else 1 if ratio >= 2 or prem >= 3e6 else 0
