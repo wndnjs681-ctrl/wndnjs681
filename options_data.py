@@ -354,6 +354,79 @@ def analyze(t, J, px_df):
     return out
 
 
+# ───────────────────────── 날마다 쓰는 해석 코멘트(규칙 기반) ─────────────────────────
+def fx(v):
+    return "—" if v is None else (f"{v:,.0f}" if abs(v) >= 1000 else f"{v:,.2f}")
+
+
+def usd(v):
+    a = abs(v or 0)
+    return ("−" if (v or 0) < 0 else "") + ("$%.1fB" % (a / 1e9) if a >= 1e9 else "$%.0fM" % (a / 1e6) if a >= 1e6 else "$%.0fK" % (a / 1e3))
+
+
+def tk_note(a):
+    """종목 하나 — 오늘 옵션 시장이 말하는 것"""
+    S, out = a["px"], []
+    cs = a.get("cshare")
+    if cs is not None:
+        tone = "콜(상승 베팅)이 압도" if cs >= 65 else "콜 우위" if cs >= 55 else "풋(하락 대비)이 압도" if cs <= 30 else "풋 우위" if cs <= 45 else "콜·풋 비슷"
+        vs = a.get("cs_vs")
+        out.append(f"거래대금 기준 콜 {cs:.0f}% — {tone}" + (f", 평소(20일 평균 {a['cs_avg']:.0f}%)보다 {'콜' if vs > 0 else '풋'} 쪽으로 {abs(vs):.0f}%p 기울었습니다." if vs is not None and abs(vs) >= 5 else "." if vs is None else ", 평소와 비슷합니다."))
+    g = a.get("net_g") or 0
+    flip = a.get("flip")
+    if g < 0:
+        out.append(f"순감마 {usd(g)}(1%당) 마이너스 — 딜러가 하락 때 팔고 상승 때 사야 해서 움직임이 커지기 쉬운 상태" + (f". 가격이 감마 플립 {fx(flip)} 위로 올라가면 진정되는 쪽으로 바뀝니다." if flip and flip > S else "."))
+    else:
+        out.append(f"순감마 {usd(g)}(1%당) 플러스 — 딜러 헤지가 움직임을 눌러 주어 박스권·되돌림이 잦은 상태" + (f". {fx(flip)} 아래로 빠지면 변동성이 커지는 구간입니다." if flip and flip < S else "."))
+    cw, pw = (a.get("cw") or [None])[0], (a.get("pw") or [None])[0]
+    if cw and pw:
+        out.append(f"위쪽 콜 벽 {fx(cw)}({(cw / S - 1) * 100:+.1f}%)은 저항, 아래 풋 벽 {fx(pw)}({(pw / S - 1) * 100:+.1f}%)은 지지로 작용하기 쉬운 자리입니다(미결제약정이 가장 많이 쌓인 행사가).")
+    if a.get("em") and a.get("near"):
+        e = a["near"]
+        out.append(f"{e['e'][5:].replace('-', '/')} 만기까지 옵션이 예상하는 범위 ±{a['emp']}% → {fx(S - a['em'])} ~ {fx(S + a['em'])}. 이 범위를 벗어나는 움직임은 '예상 밖'으로 봅니다.")
+    iv, rv = a.get("iv30"), a.get("rv20")
+    if iv and rv:
+        out.append(f"30일 IV {iv:.0f}% vs 실제 변동성 {rv:.0f}% — " + ("옵션이 실제 움직임보다 비쌉니다(공포 프리미엄). 옵션 매수보다 매도 쪽이 유리한 환경." if iv > rv * 1.15 else "옵션이 실제보다 쌉니다. 큰 움직임을 노리는 옵션 매수가 상대적으로 싸게 먹히는 환경." if iv < rv * 0.85 else "IV가 실제 움직임과 비슷해 옵션 가격은 적정 수준."))
+    sk = a.get("skew")
+    if sk is not None:
+        out.append(f"25델타 스큐 {sk:+.1f}%p — " + ("하락 대비(풋) 수요가 강해 풋이 꽤 비쌉니다." if sk >= 12 else "풋이 콜보다 약간 비싼 보통 수준." if sk >= 3 else "콜이 풋만큼 비쌈 — 상승 기대(콜 매수)가 강한 드문 상태." if sk < 0 else "풋·콜 가격 차이가 작음."))
+    mp = a.get("mp")
+    if mp and a.get("near") and a["near"]["dte"] <= 3:
+        out.append(f"가장 가까운 만기 맥스페인 {fx(mp)}({(mp / S - 1) * 100:+.1f}%) — 만기 직전에는 가격이 이쪽으로 끌리는(핀) 경우가 있습니다.")
+    U = a.get("unusual") or []
+    if U:
+        u = U[0]
+        out.append(f"가장 눈에 띈 거래: {u['e'][5:].replace('-', '/')} 만기 {fx(u['k'])} {'콜' if u['cp'] == 'C' else '풋'} {usd(u['prem'])}({u['why']}) — " + ("상승에 크게 건 돈" if u["cp"] == "C" and u["otm"] > 0 else "하락 대비·하락 베팅" if u["cp"] == "P" and u["otm"] < 0 else "내가격 쪽 큰 거래(헤지·롤오버일 수 있음)") + ".")
+    return out
+
+
+def mk_note(res, sm):
+    """시장 전체 — 오늘의 한 줄 요약 + 근거"""
+    out = []
+    cs = sm.get("cshare")
+    a = res.get("SPX") or res.get("SPY")
+    if cs is not None:
+        out.append(f"오늘 추적 종목 전체 옵션 거래대금의 콜 비중 {cs:.0f}% — " + ("시장이 하락 대비(풋)에 돈을 크게 쓰고 있습니다. 공포가 큰 날이며, 이런 날 뒤에는 단기 반등이 자주 나오지만 추세가 꺾였는지는 지수 추세로 따로 확인해야 합니다." if cs < 30 else "풋이 우세 — 조심스러운 분위기." if cs < 45 else "콜이 우세 — 상승 기대가 강한 날." if cs > 58 else "콜·풋이 비슷 — 뚜렷한 쏠림 없음."))
+    if a:
+        S, g = a["px"], a.get("net_g") or 0
+        out.append(f"{a['t']} {fx(S)}: 순감마 {usd(g)}로 {'마이너스(변동성 확대 국면)' if g < 0 else '플러스(변동성 억제 국면)'}. " +
+                   (f"콜 벽 {fx(a['cw'][0])}·풋 벽 {fx(a['pw'][0])} 사이가 옵션이 그리는 범위이고, " if a.get("cw") and a.get("pw") else "") +
+                   (f"하루 예상 변동 ±{a['emp']}%." if a.get("emp") else ""))
+        if a.get("flip"):
+            out.append(f"감마 플립 {fx(a['flip'])}({(a['flip'] / S - 1) * 100:+.1f}%) — " + ("지금 가격이 플립 아래라 움직임이 커지기 쉽습니다. 이 위로 회복하면 시장이 진정되는 신호." if S < a["flip"] else "지금 가격이 플립 위라 큰 흔들림이 눌리는 편. 이 아래로 깨지면 변동성 확대 주의."))
+        if a.get("iv30") and a.get("rv20"):
+            out.append(f"{a['t']} 30일 IV {a['iv30']:.0f}% · 실제 변동성 {a['rv20']:.0f}% · 스큐 {a.get('skew') or 0:+.1f}%p — " + ("옵션 시장이 앞으로도 큰 움직임을 예상하고 있습니다." if a["iv30"] >= 25 else "변동성 기대가 낮은 편입니다." if a["iv30"] < 15 else "보통 수준의 변동성 기대."))
+    hot = sorted([x for x in res.values() if x["t"] not in ("SPX", "SPY", "QQQ", "IWM") and x.get("cshare") is not None], key=lambda x: -(x["cprem"] + x["pprem"]))[:8]
+    bull = [x["t"] for x in hot if x["cshare"] >= 55]; bear = [x["t"] for x in hot if x["cshare"] <= 35]
+    if bull or bear:
+        out.append("개별 종목: " + (f"콜 쏠림 {', '.join(bull)}" if bull else "") + (" · " if bull and bear else "") + (f"풋 쏠림 {', '.join(bear)}" if bear else "") + " (거래대금 상위 종목 중).")
+    hv = sorted([x for x in res.values() if x.get("iv30") and x.get("rv20")], key=lambda x: -(x["iv30"] - x["rv20"]))[:3]
+    if hv:
+        out.append("IV가 실제 변동성보다 가장 비싼 종목: " + ", ".join(f"{x['t']}(IV {x['iv30']:.0f}% vs 실제 {x['rv20']:.0f}%)" for x in hv) + " — 실적·이벤트를 앞둔 경우가 많습니다.")
+    out.append("※ 규칙으로 만든 자동 해석입니다. 옵션 자료는 '시장이 무엇에 돈을 걸었는지'를 보여 줄 뿐 방향을 맞히는 신호가 아니니, 지수 추세·수급과 함께 보세요.")
+    return out
+
+
 def main():
     p = os.path.join(OUT, "market_index.json")
     mi = json.load(open(p, encoding="utf-8"))
@@ -414,6 +487,15 @@ def main():
             a["ivp"] = round(sum(1 for v in ivs if v <= a["iv30"]) / len(ivs) * 100)
         a["hist_n"] = len(H)
         a["hist"] = [[h["d"][2:].replace("-", ""), h.get("cs"), h.get("iv"), h.get("pc")] for h in H[-60:]]
+    allU0 = [u for a in res.values() for u in a["unusual"]]
+    tc0 = sum(a["cprem"] for a in res.values()); tp0 = sum(a["pprem"] for a in res.values())
+    sm0 = {"cshare": round(tc0 / (tc0 + tp0) * 100, 1) if tc0 + tp0 else None}
+    for t, a in res.items():
+        a["note"] = tk_note(a)
+    N = hist.setdefault("_notes", [])
+    N[:] = [n for n in N if n.get("d") != day] + [{"d": day, "mk": mk_note(res, sm0), "tk": {t: a["note"] for t, a in res.items()}}]
+    N.sort(key=lambda n: n["d"])
+    del N[:-60]
     json.dump(hist, open(hp, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     allU = sorted([u for a in res.values() for u in a["unusual"]], key=lambda u: (-u["lvl"], -u["prem"]))
     tc = sum(a["cprem"] for a in res.values()); tp = sum(a["pprem"] for a in res.values())
@@ -421,7 +503,8 @@ def main():
     mi["opt"] = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "day": day, "src": " · ".join(sorted(srcs)) + " 지연 시세 · 장 마감 뒤 스냅샷",
                  "sum": {"cprem": tc, "pprem": tp, "cv": sum(a["cv"] for a in res.values()), "pv": sum(a["pv"] for a in res.values()),
                          "cshare": round(tc / (tc + tp) * 100, 1) if tc + tp else None, "n": len(res), "unusual": len(allU)},
-                 "top": allU[:40], "t": res}
+                 "top": allU[:40], "t": res,
+                 "notes": [{"d": n["d"], "mk": n["mk"], "tk": n["tk"]} for n in hist["_notes"][-15:]]}
     json.dump(mi, open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print(f"→ {p} opt · {len(res)}종목 · 특이 {len(allU)}건 · 크기 {len(json.dumps(mi['opt'])) // 1024}KB")
 
