@@ -28,18 +28,78 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 OSYM = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 
 
+CBOE_OK = [True]
+
+
 def fetch_chain(t):
     sym = IDXSYM.get(t, t)
-    for k in range(3):
+    if CBOE_OK[0]:
+        for k in range(2):
+            try:
+                r = requests.get(f"https://cdn.cboe.com/api/global/delayed_quotes/options/{sym}.json", timeout=30,
+                                 headers={"User-Agent": UA, "Accept": "application/json, text/plain, */*", "Referer": "https://www.cboe.com/", "Origin": "https://www.cboe.com",
+                                          "Accept-Language": "en-US,en;q=0.9"})
+                if r.status_code == 200:
+                    return t, r.json()
+                print(f"[{t}] CBOE {r.status_code}")
+                if r.status_code == 403:
+                    break
+            except Exception as e:
+                print(f"[{t}] {type(e).__name__}")
+            time.sleep(1.5 + k)
+    return t, yahoo_chain(t)
+
+
+# ── 대체 출처: 야후 옵션 체인(yfinance) + 블랙숄즈로 델타·감마 ──
+def _ncdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def bs_greeks(S, K, T, iv, cp, r=0.04):
+    if not (S and K and T and iv) or iv <= 0 or T <= 0:
+        return None, None
+    d1 = (math.log(S / K) + (r + iv * iv / 2) * T) / (iv * math.sqrt(T))
+    pdf = math.exp(-d1 * d1 / 2) / math.sqrt(2 * math.pi)
+    gamma = pdf / (S * iv * math.sqrt(T))
+    delta = _ncdf(d1) if cp == "C" else _ncdf(d1) - 1
+    return delta, gamma
+
+
+def yahoo_chain(t):
+    try:
+        import yfinance as yf
+    except Exception:
+        print("yfinance 없음")
+        return None
+    ysym = {"SPX": "^SPX", "NDX": "^NDX", "RUT": "^RUT"}.get(t, t)
+    for k in range(2):
         try:
-            r = requests.get(f"https://cdn.cboe.com/api/global/delayed_quotes/options/{sym}.json", headers={"User-Agent": UA, "Accept": "application/json"}, timeout=30)
-            if r.status_code == 200:
-                return t, r.json()
-            print(f"[{t}] CBOE {r.status_code}")
+            tk = yf.Ticker(ysym)
+            exps = list(tk.options or [])[:int(os.getenv("OPT_YEXP", "9"))]
+            if not exps:
+                raise RuntimeError("만기 없음")
+            hist = tk.history(period="5d")
+            S = float(hist["Close"].iloc[-1]); prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else S
+            opts = []
+            today = datetime.now(ET).date()
+            for e in exps:
+                ch = tk.option_chain(e)
+                ed = datetime.strptime(e, "%Y-%m-%d").date()
+                T = max((ed - today).days, 0.5) / 365
+                for cp, df in (("C", ch.calls), ("P", ch.puts)):
+                    for _, x in df.iterrows():
+                        K = float(x["strike"]); iv = f(x.get("impliedVolatility"))
+                        dl, gm = bs_greeks(S, K, T, iv, cp)
+                        opts.append({"option": f"{t}{ed:%y%m%d}{cp}{int(round(K * 1000)):08d}", "bid": f(x.get("bid")), "ask": f(x.get("ask")),
+                                     "last_trade_price": f(x.get("lastPrice")), "volume": f(x.get("volume")) or 0, "open_interest": f(x.get("openInterest")) or 0,
+                                     "iv": iv, "delta": dl, "gamma": gm, "percent_change": f(x.get("percentChange"))})
+                time.sleep(0.3)
+            return {"timestamp": datetime.now(ET).strftime("%Y-%m-%d %H:%M ET"), "src": "yahoo",
+                    "data": {"current_price": S, "price_change_percent": (S / prev - 1) * 100 if prev else None, "options": opts}}
         except Exception as e:
-            print(f"[{t}] {type(e).__name__}")
-        time.sleep(1.5 + k)
-    return t, None
+            print(f"[{t}] 야후 {type(e).__name__}: {str(e)[:80]}")
+            time.sleep(3 + k * 3)
+    return None
 
 
 def fetch_px(t):
@@ -289,8 +349,13 @@ def main():
         hist = json.load(open(hp, encoding="utf-8"))
     except Exception:
         hist = {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        chains = dict(ex.map(fetch_chain, TICK))
+    t0, J0 = fetch_chain(TICK[0])                             # 첫 종목으로 CBOE 가능 여부 확인 → 막히면 나머지는 바로 야후로
+    if not (J0 and J0.get("src") != "yahoo"):
+        CBOE_OK[0] = False
+        print("CBOE 지연 시세가 막혀 야후 옵션 체인으로 받습니다")
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        chains = dict(ex.map(fetch_chain, TICK[1:]))
+    chains[t0] = J0
     with ThreadPoolExecutor(max_workers=6) as ex:
         pxs = dict(ex.map(fetch_px, TICK))
     res, first = {}, True
@@ -339,7 +404,8 @@ def main():
     json.dump(hist, open(hp, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     allU = sorted([u for a in res.values() for u in a["unusual"]], key=lambda u: (-u["lvl"], -u["prem"]))
     tc = sum(a["cprem"] for a in res.values()); tp = sum(a["pprem"] for a in res.values())
-    mi["opt"] = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "day": day, "src": "CBOE 지연 시세(15분) · 장 마감 뒤 스냅샷",
+    srcs = {("야후" if (chains.get(t) or {}).get("src") == "yahoo" else "CBOE") for t in res}
+    mi["opt"] = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "day": day, "src": " · ".join(sorted(srcs)) + " 지연 시세 · 장 마감 뒤 스냅샷",
                  "sum": {"cprem": tc, "pprem": tp, "cv": sum(a["cv"] for a in res.values()), "pv": sum(a["pv"] for a in res.values()),
                          "cshare": round(tc / (tc + tp) * 100, 1) if tc + tp else None, "n": len(res), "unusual": len(allU)},
                  "top": allU[:40], "t": res}
