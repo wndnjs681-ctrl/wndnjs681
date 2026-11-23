@@ -286,13 +286,13 @@ def analyze(t, J, px_df):
     skew = r2(p25 - c25, 1) if p25 is not None and c25 is not None else None
     # 옵션 체인: 가까운 만기 4개 × 지금 가격 근처 행사가 ±14
     chain = []
-    for e in [e for e in exps if dte(e) >= 0][:5]:
+    for e in [e for e in exps if dte(e) >= 0][:4]:
         L = [r for r in rows if r["exp"] == e]
         kset = sorted({r["k"] for r in L})
         if not kset:
             continue
         i0 = min(range(len(kset)), key=lambda i: abs(kset[i] - S))
-        ksel = kset[max(0, i0 - 14): i0 + 15]
+        ksel = kset[max(0, i0 - 12): i0 + 13]
         line = []
         for K in ksel:
             c = next((r for r in L if r["k"] == K and r["cp"] == "C"), None); p = next((r for r in L if r["k"] == K and r["cp"] == "P"), None)
@@ -326,7 +326,7 @@ def analyze(t, J, px_df):
         if len(lr) >= 20:
             m = sum(lr[-20:]) / 20
             rv20 = math.sqrt(sum((x - m) ** 2 for x in lr[-20:]) / 19) * math.sqrt(252) * 100
-        tail = px_df.tail(260)
+        tail = px_df.tail(200)
         ohlc = {"d": [d.strftime("%y%m%d") for d in tail.index], **{k[0].lower(): [r2(float(v)) for v in tail[k]] for k in ("Open", "High", "Low", "Close") if k in tail},
                 "v": [int(v) for v in tail["Volume"]] if "Volume" in tail else []}
     em_d = near["em"] if near else None
