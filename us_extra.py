@@ -73,7 +73,54 @@ def earnings():
         days[d.isoformat()] = out[:220]
         time.sleep(0.4)
     LOG["earn"] = {k: len(v) for k, v in days.items()}
-    return {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "days": days}
+    E = {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "days": days}
+    try:
+        earn_revenue(E)
+    except Exception as e:
+        print("매출 보강 실패", type(e).__name__, e)
+    return E
+
+
+def earn_revenue(E):
+    """시총 $2B 이상 종목: 다음 분기 매출 예상(야후 calendar)·발표 뒤 실제 매출(분기 손익계산서). 예상은 발표 전 캐시에 보관."""
+    try:
+        import yfinance as yf
+    except Exception:
+        print("yfinance 없음 — 매출 건너뜀")
+        return
+    cp = os.path.join(OUT, "earn_cache.json")
+    try:
+        cache = json.load(open(cp, encoding="utf-8"))
+    except Exception:
+        cache = {}
+    rows = [r for v in E["days"].values() for r in v if (r.get("mc") or 0) >= 2e9]
+    done = 0
+    for r in rows[:int(os.getenv("EARN_REV_N", "160"))]:
+        key = f"{r['t']}|{r.get('fq')}"
+        c = cache.setdefault(key, {})
+        try:
+            tk = yf.Ticker(r["t"])
+            if r.get("eps") is None and "rev_est" not in c:
+                cal = tk.calendar or {}
+                if isinstance(cal, dict) and cal.get("Revenue Average"):
+                    c["rev_est"] = float(cal["Revenue Average"]); c["rev_lo"] = float(cal.get("Revenue Low") or 0) or None; c["rev_hi"] = float(cal.get("Revenue High") or 0) or None
+            if r.get("eps") is not None and "rev" not in c:
+                q = tk.quarterly_income_stmt
+                if q is not None and "Total Revenue" in q.index and len(q.columns):
+                    c["rev"] = float(q.loc["Total Revenue"].iloc[0]); c["rev_q"] = str(q.columns[0])[:10]
+            done += 1
+        except Exception as e:
+            c["err"] = type(e).__name__
+        for k in ("rev_est", "rev_lo", "rev_hi", "rev"):
+            if c.get(k) is not None:
+                r[k] = round(c[k])
+        if r.get("rev") and r.get("rev_est"):
+            r["rsur"] = round((r["rev"] / r["rev_est"] - 1) * 100, 2)
+        time.sleep(0.25)
+    if len(cache) > 3000:
+        cache = dict(list(cache.items())[-3000:])
+    json.dump(cache, open(cp, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    LOG["earn_rev"] = f"{done}건 조회 · 예상 {sum(1 for r in rows if r.get('rev_est'))} · 실제 {sum(1 for r in rows if r.get('rev'))}"
 
 
 # ───────── 매크로 ─────────
@@ -113,9 +160,77 @@ def fred(sid):
     return None, None
 
 
+def treasury():
+    """미 재무부 일별 국채 금리(명목·실질) 공개 CSV — 올해·작년"""
+    res = {}
+    y0 = date.today().year
+    for typ, cols in (("daily_treasury_yield_curve", {"3 Mo": "DGS3MO", "2 Yr": "DGS2", "10 Yr": "DGS10"}), ("daily_treasury_real_yield_curve", {"10 YR": "DFII10"})):
+        rows = []
+        for y in (y0 - 1, y0):
+            try:
+                r = requests.get(f"https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{y}/all",
+                                 params={"type": typ, "field_tdr_date_value": y, "page": "", "_format": "csv"}, headers={"User-Agent": UA}, timeout=25)
+                lines = r.text.strip().splitlines()
+                if r.status_code != 200 or len(lines) < 2 or "Date" not in lines[0]:
+                    print("재무부", typ, y, r.status_code)
+                    continue
+                hd = [h.strip().strip('"') for h in lines[0].split(",")]
+                for ln in lines[1:]:
+                    v = [x.strip().strip('"') for x in ln.split(",")]
+                    rows.append(dict(zip(hd, v)))
+            except Exception as e:
+                print("재무부", typ, y, type(e).__name__)
+        for col, sid in cols.items():
+            pts = []
+            for r in rows:
+                key = next((k for k in r if k.upper() == col.upper()), None)
+                x = num(r.get(key)) if key else None
+                try:
+                    d = datetime.strptime(r.get("Date", ""), "%m/%d/%Y").date()
+                except ValueError:
+                    continue
+                if x is not None:
+                    pts.append([d.isoformat(), x])
+            pts.sort()
+            if pts:
+                res[sid] = pts
+    return res
+
+
+def te_rate():
+    """Trading Economics — 미국 기준금리(최근 결정들)"""
+    try:
+        r = requests.get("https://tradingeconomics.com/united-states/interest-rate", headers={"User-Agent": UA, "Accept-Language": "en-US"}, timeout=20)
+        i = r.text.find('id="calendar"')
+        seg = r.text[i: i + 8000] if i > 0 else ""
+        pts = []
+        for body in re.findall(r"<tr[^>]*data-category[^>]*>(.*?)</tr>", seg, re.S):
+            cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", c)).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", body, re.S)]
+            if len(cells) >= 5 and num(cells[4]) is not None:
+                pts.append([cells[0], num(cells[4])])
+        m = re.search(r"benchmark interest rate in the United States (?:was|to) (?:last recorded at )?([\d.]+) percent", r.text, re.I)
+        if not pts and m:
+            pts = [[date.today().isoformat(), float(m.group(1))]]
+        return sorted(pts)
+    except Exception as e:
+        print("TE 기준금리", type(e).__name__)
+        return []
+
+
 def macro():
     out = {}
+    TR = treasury()
+    LOG["treasury"] = {k: len(v) for k, v in TR.items()}
+    for sid, nm in (("DGS10", "미 10년물 금리"), ("DGS2", "미 2년물 금리"), ("DGS3MO", "미 3개월물 금리"), ("DFII10", "10년 실질금리(TIPS)")):
+        if TR.get(sid):
+            P = TR[sid][-260:]
+            out[sid] = {"n": nm, "u": "%", "src": "미 재무부", "d": [p[0][2:].replace("-", "") for p in P], "v": [p[1] for p in P]}
+    fr = te_rate()
+    if fr:
+        out["DFEDTARU"] = {"n": "기준금리(상단)", "u": "%", "src": "Trading Economics", "d": [p[0][2:].replace("-", "") for p in fr], "v": [p[1] for p in fr]}
     for sid, nm, u in FRED:
+        if sid in out:
+            continue
         pts, src = fred(sid)
         if pts:
             yn = YNAME.get(sid) if src == "야후" else None
@@ -235,6 +350,34 @@ def feed(us_tickers):
     return {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "items": items[:600]}
 
 
+def telegram(items):
+    """중요 소식을 텔레그램으로(저장소 Secrets 에 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID 가 있을 때만). 보낸 것은 기록해 두 번 보내지 않음."""
+    tok, chat = os.getenv("TELEGRAM_BOT_TOKEN", "").strip(), os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not tok or not chat:
+        print("텔레그램 설정 없음 — 알림 건너뜀")
+        return
+    sp = os.path.join(OUT, "tg_sent.json")
+    try:
+        sent = set(json.load(open(sp, encoding="utf-8")))
+    except Exception:
+        sent = set()
+    new = [i for i in items if i["imp"] >= int(os.getenv("TG_MIN_IMP", "3")) and (i["k"] + i["title"] + i.get("d", "")) not in sent][:15]
+    n = 0
+    for i in reversed(new):
+        txt = f"{'🇺🇸' if i['mk'] == 'us' else '🇰🇷'} [{ {'halt': '거래정지', 'dart': '공시', 'news': '뉴스'}.get(i['k'], i['k']) }] {i['title']}\n{i.get('x', '')}\n{i.get('d', '')} KST\n{i.get('url', '')}"
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage", json={"chat_id": chat, "text": txt[:3900], "disable_web_page_preview": True}, timeout=15)
+            if r.status_code == 200:
+                sent.add(i["k"] + i["title"] + i.get("d", "")); n += 1
+            else:
+                print("텔레그램", r.status_code, r.text[:120])
+        except Exception as e:
+            print("텔레그램", type(e).__name__)
+        time.sleep(0.5)
+    json.dump(sorted(sent)[-3000:], open(sp, "w", encoding="utf-8"), ensure_ascii=False)
+    LOG["telegram"] = n
+
+
 def main():
     p = os.path.join(OUT, "market_index.json")
     mi = json.load(open(p, encoding="utf-8"))
@@ -256,6 +399,10 @@ def main():
             import traceback
             traceback.print_exc()
             print(f"{key} 실패: {type(e).__name__}: {e}")
+    try:
+        telegram((mi.get("feed") or {}).get("items") or [])
+    except Exception as e:
+        print("텔레그램 실패", type(e).__name__)
     json.dump(mi, open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print("출처:", LOG)
     print("크기:", {k: len(json.dumps(mi.get(k) or {})) // 1024 for k in ("earn", "macro", "ussc", "feed")}, "KB")

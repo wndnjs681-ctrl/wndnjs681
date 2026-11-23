@@ -18,7 +18,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,17 +26,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install --quiet requests
+      - run: pip install --quiet requests yfinance
       - name: US extra
         env:
           PYTHONUNBUFFERED: "1"
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # 있으면 중요 소식 알림(없으면 건너뜀)
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python us_extra.py
       - name: Commit
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add output/market_index.json
+          git add output/market_index.json; for f in output/earn_cache.json output/tg_sent.json; do [ -f $f ] && git add $f; done; true
           git diff --staged --quiet || git commit -m "us-extra: $(date -u +%Y-%m-%d\ %H:%M) UTC"
           git pull --rebase --autostash || true
           git push
