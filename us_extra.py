@@ -79,7 +79,8 @@ def earnings():
 # ───────── 매크로 ─────────
 FRED = [("DGS10", "미 10년물 금리", "%"), ("DGS2", "미 2년물 금리", "%"), ("T10Y2Y", "10년−2년 스프레드", "%p"), ("DFII10", "10년 실질금리", "%"),
         ("DFEDTARU", "기준금리 상단", "%"), ("DCOILWTICO", "WTI 유가", "$"), ("DTWEXBGS", "달러지수(광의)", ""), ("BAMLH0A0HYM2", "하이일드 스프레드", "%p")]
-YAH = {"DGS10": "^TNX", "DCOILWTICO": "CL=F", "DTWEXBGS": "DX-Y.NYB"}
+YAH = {"DGS10": "^TNX", "DGS2": "2YY=F", "DCOILWTICO": "CL=F", "DTWEXBGS": "DX-Y.NYB", "DFEDTARU": "^IRX", "BAMLH0A0HYM2": "HYG"}
+YNAME = {"DTWEXBGS": "달러지수(DXY)", "DFEDTARU": "미 3개월물 금리", "BAMLH0A0HYM2": "하이일드 채권 ETF(HYG)"}
 
 
 def fred(sid):
@@ -105,7 +106,7 @@ def fred(sid):
             j = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{ys}", params={"range": "1y", "interval": "1d"}, headers={"User-Agent": UA}, timeout=20).json()
             R = j["chart"]["result"][0]
             ts, cl = R["timestamp"], R["indicators"]["quote"][0]["close"]
-            pts = [[datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d"), round(c / (10 if ys == "^TNX" and c > 20 else 1), 3)] for t, c in zip(ts, cl) if c is not None]
+            pts = [[datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d"), round(c / (10 if ys in ("^TNX", "^IRX") and c > 20 else 1), 3)] for t, c in zip(ts, cl) if c is not None]
             return pts, "야후"
         except Exception as e:
             print("야후", ys, type(e).__name__)
@@ -117,8 +118,14 @@ def macro():
     for sid, nm, u in FRED:
         pts, src = fred(sid)
         if pts:
-            out[sid] = {"n": nm, "u": u, "src": src, "d": [p[0][2:].replace("-", "") for p in pts[-260:]], "v": [p[1] for p in pts[-260:]]}
+            yn = YNAME.get(sid) if src == "야후" else None
+            out[sid] = {"n": yn or nm, "u": ("$" if sid == "BAMLH0A0HYM2" else u) if yn else u, "src": src, "d": [p[0][2:].replace("-", "") for p in pts[-260:]], "v": [p[1] for p in pts[-260:]]}
         time.sleep(0.3)
+    if "T10Y2Y" not in out and "DGS10" in out and "DGS2" in out:            # 10년−2년은 직접 계산
+        a, b = out["DGS10"], out["DGS2"]
+        m2 = dict(zip(b["d"], b["v"]))
+        dd = [d for d in a["d"] if d in m2]
+        out["T10Y2Y"] = {"n": "10년−2년 스프레드", "u": "%p", "src": "계산", "d": dd, "v": [round(a["v"][a["d"].index(d)] - m2[d], 3) for d in dd]}
     LOG["macro"] = {k: v["src"] for k, v in out.items()}
     return {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "s": out}
 
@@ -134,9 +141,13 @@ def us_all():
         if not t or "^" in t or "/" in t:
             continue
         nm = (r.get("name") or "").strip()
+        if re.search(r"\b(Warrants?|Units?|Rights?|Preferred|Notes due|Debentures|Depositary Shares, each representing)\b", nm, re.I) and "ADS" not in nm:
+            continue                                            # 워런트·유닛·우선주·채권 제외(보통주·ADR만)
+        nm = re.sub(r"\s+(Common Stock|Class [A-Z] Common Stock|Ordinary Shares|American Depositary Shares).*$", "", nm, flags=re.I)
         spac = bool(re.search(r"acquisition corp|blank check|SPAC", nm, re.I))
-        out.append([t, nm[:48], num(r.get("lastsale")), num(r.get("pctchange")), num(r.get("marketCap")), num(r.get("volume")),
-                    (r.get("sector") or "").strip(), (r.get("industry") or "").strip()[:40], num(r.get("ipoyear")), (r.get("country") or "").strip()[:20], 1 if spac else 0])
+        mc = num(r.get("marketCap"))
+        out.append([t, nm[:36], num(r.get("lastsale")), round(num(r.get("pctchange")) or 0, 2), int(mc) if mc else None, int(num(r.get("volume")) or 0),
+                    (r.get("sector") or "").strip(), (r.get("industry") or "").strip()[:28], None, "", 1 if spac else 0])
     LOG["ussc"] = len(out)
     return {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "cols": ["t", "n", "px", "chg", "mc", "vol", "sec", "ind", "ipo", "ctry", "spac"], "rows": out}
 
