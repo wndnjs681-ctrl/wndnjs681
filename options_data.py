@@ -151,8 +151,9 @@ def analyze(t, J, px_df):
     exps = sorted({r["exp"] for r in rows})
     dte = lambda e: max((e - today).days, 0)
     # ── 거래량·거래대금 ──
-    cv = sum(r["vol"] for r in rows if r["cp"] == "C"); pv = sum(r["vol"] for r in rows if r["cp"] == "P")
-    cprem = sum(r["vol"] * r["px"] * 100 for r in rows if r["cp"] == "C"); pprem = sum(r["vol"] * r["px"] * 100 for r in rows if r["cp"] == "P")
+    flow = [r for r in rows if abs(r["k"] / S - 1) <= 0.2]     # 깊은 내가격(스프레드·박스 거래)이 거래대금을 부풀리지 않게 ±20% 안만
+    cv = sum(r["vol"] for r in flow if r["cp"] == "C"); pv = sum(r["vol"] for r in flow if r["cp"] == "P")
+    cprem = sum(r["vol"] * r["px"] * 100 for r in flow if r["cp"] == "C"); pprem = sum(r["vol"] * r["px"] * 100 for r in flow if r["cp"] == "P")
     coi = sum(r["oi"] for r in rows if r["cp"] == "C"); poi = sum(r["oi"] for r in rows if r["cp"] == "P")
 
     def atm_iv(e):
@@ -211,15 +212,25 @@ def analyze(t, J, px_df):
             continue
         g = r["gamma"] * r["oi"] * 100 * S * S * 0.01 * (1 if r["cp"] == "C" else -1)
         gex[r["k"]] = gex.get(r["k"], 0) + g
-    ks = sorted(gex)
     net_g = sum(gex.values())
+    # 감마 플립: 가격이 s 로 움직였다고 보고 모든 계약 감마를 다시 계산(블랙숄즈) → 순감마가 0을 지나는 가격(지금 가격에 가장 가까운 것)
     flip = None
-    cum = 0
-    for k in ks:                                            # 아래에서부터 누적 — 부호가 바뀌는 행사가
-        prev = cum
-        cum += gex[k]
-        if prev < 0 <= cum or prev > 0 >= cum:
-            flip = k
+    G = [(r["k"], max(dte(r["exp"]), 0.5) / 365, r["iv"], r["oi"], 1 if r["cp"] == "C" else -1) for r in rows
+         if r["oi"] > 0 and r["iv"] and r["iv"] > 0 and abs(r["k"] / S - 1) <= 0.3 and dte(r["exp"]) <= 120]
+    if G:
+        prof = []
+        for j in range(-30, 31):
+            sp = S * (1 + j * 0.005)
+            tot = 0.0
+            for K, T, iv, oi, sg in G:
+                _, gm = bs_greeks(sp, K, T, iv, "C")
+                if gm:
+                    tot += sg * gm * oi * 100 * sp * sp * 0.01
+            prof.append((sp, tot))
+        cross = [(prof[i][0] + (prof[i + 1][0] - prof[i][0]) * (0 - prof[i][1]) / (prof[i + 1][1] - prof[i][1]))
+                 for i in range(len(prof) - 1) if prof[i][1] == 0 or (prof[i][1] < 0) != (prof[i + 1][1] < 0)]
+        if cross:
+            flip = round(min(cross, key=lambda x: abs(x - S)), 2)
     # 콜 벽·풋 벽(미결제 + 감마 기준, 지금 가격 위/아래)
     oik = {}
     for r in rows:
@@ -303,7 +314,7 @@ def analyze(t, J, px_df):
     unusual = []
     for r in rows:
         prem = r["vol"] * r["px"] * 100
-        if prem < 1e6 or r["vol"] < 500:
+        if prem < 1e6 or r["vol"] < 500 or abs(r["k"] / S - 1) > 0.2 or not r["iv"]:
             continue
         ratio = r["vol"] / r["oi"] if r["oi"] > 0 else 99
         lvl = 3 if prem >= 2e7 or (ratio >= 10 and prem >= 5e6) else 2 if prem >= 5e6 or ratio >= 5 else 1 if ratio >= 2 or prem >= 3e6 else 0
