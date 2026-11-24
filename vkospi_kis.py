@@ -43,16 +43,13 @@ def codes():
         z = zipfile.ZipFile(io.BytesIO(r.content))
         txt = z.read(z.namelist()[0]).decode("cp949", "ignore")
         for ln in txt.splitlines():
-            if "변동성" in ln:
+            if "변동성지수" in ln and "200" in ln and "목표" not in ln:
                 m = re.match(r"\s*\S?(\d{4})", ln)
                 print("  코드표:", ln.strip()[:60])
                 if m:
                     out.append(m.group(1))
     except Exception as e:
         print("  코드표 실패:", type(e).__name__, str(e)[:120])
-    for c in ("2300", "0300", "2401", "4300"):
-        if c not in out:
-            out.append(c)
     return out
 
 
@@ -93,7 +90,73 @@ def daily(tok, code):
     return m, nm
 
 
+KRX = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+KH = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201010101",
+      "X-Requested-With": "XMLHttpRequest"}
+
+
+def krx():
+    """KRX 정보데이터시스템: 지수 검색으로 '변동성' 지수 코드를 찾고 일별 시세를 받는다."""
+    cands, r = [], None
+    for mkt in ("1", "2", "3", "4", "5", ""):
+        try:
+            r = requests.post(KRX, data={"bld": "dbms/comm/finder/finder_equidx", "mktsel": mkt, "searchText": "변동성"}, headers=KH, timeout=20)
+            j = r.json()
+            rows = j.get("block1") or []
+            print(f"  KRX 검색 mktsel={mkt!r}: HTTP {r.status_code} · {len(rows)}건 · {str(rows[:3])[:200]}")
+            for x in rows:
+                nm = str(x.get("codeName") or x.get("full_code") or "")
+                if "200" in nm and "변동성" in nm and "목표" not in nm and "저변동" not in nm:
+                    cands.append(x)
+        except Exception as e:
+            print(f"  KRX 검색 mktsel={mkt!r}: {type(e).__name__} {str(e)[:120]} · {(getattr(r, 'text', '') or '')[:120]!r}")
+        if cands:
+            break
+    end = datetime.now(KST)
+    for x in cands:
+        g1, g2 = str(x.get("marketCode") or x.get("indIdx") or ""), str(x.get("short_code") or x.get("indIdx2") or x.get("full_code") or "")
+        print("  KRX 후보:", x)
+        m = {}
+        for yrs in range(5):                                 # 2년씩 끊어 받기(한 번 요청 기간 제한)
+            st, en = end - timedelta(days=730 * (yrs + 1)), end - timedelta(days=730 * yrs)
+            try:
+                r = requests.post(KRX, data={"bld": "dbms/MDC/STAT/standard/MDCSTAT00301", "indIdx": g1, "indIdx2": g2,
+                                             "strtDd": st.strftime("%Y%m%d"), "endDd": en.strftime("%Y%m%d"), "share": "1", "money": "1"}, headers=KH, timeout=30)
+                rows = r.json().get("output") or []
+            except Exception as e:
+                print("   시세 실패", type(e).__name__, getattr(r, "text", "")[:120])
+                break
+            if not yrs:
+                print(f"   시세 {len(rows)}행 · {str(rows[:1])[:200]}")
+            for q in rows:
+                d = str(q.get("TRD_DD") or "").replace("/", "-")
+                f = lambda k: round(float(str(q.get(k) or "0").replace(",", "")), 2) or None
+                if d and f("CLSPRC_IDX"):
+                    m[d] = (f("OPNPRC_IDX"), f("HGPRC_IDX"), f("LWPRC_IDX"), f("CLSPRC_IDX"))
+            if not rows:
+                break
+            time.sleep(0.5)
+        if len(m) > 100:
+            return "KRX:" + g1 + "/" + g2, m
+    return None, {}
+
+
+def save(sym, m):
+    d = sorted(m)[-KEEP:]
+    p = os.path.join(OUT, "market_index.json")
+    mi = json.load(open(p, encoding="utf-8"))
+    mi.setdefault("idx", {})["VKOSPI"] = {"name": "VKOSPI(코스피 공포지수)", "mk": "macro", "rg": "거시", "core": False, "kind": "vix", "sym": sym,
+                                          "d": d, "o": [m[x][0] for x in d], "h": [m[x][1] for x in d], "l": [m[x][2] for x in d],
+                                          "c": [m[x][3] for x in d], "v": [0] * len(d)}
+    json.dump(mi, open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    print(f"→ VKOSPI {len(d)}일 · {d[0]}~{d[-1]} · 마지막 {m[d[-1]][3]} ({sym})")
+
+
 def main():
+    sym, m = krx()
+    if m:
+        save(sym, m)
+        return
     if not KEY or not SECRET:
         print("KIS 키 없음 — VKOSPI 건너뜀")
         return
@@ -111,15 +174,7 @@ def main():
     if not best:
         print("VKOSPI 못 받음")
         return
-    c, m = best
-    d = sorted(m)[-KEEP:]
-    p = os.path.join(OUT, "market_index.json")
-    mi = json.load(open(p, encoding="utf-8"))
-    mi.setdefault("idx", {})["VKOSPI"] = {"name": "VKOSPI(코스피 공포지수)", "mk": "macro", "rg": "거시", "core": False, "kind": "vix", "sym": "KIS:U" + c,
-                                          "d": d, "o": [m[x][0] for x in d], "h": [m[x][1] for x in d], "l": [m[x][2] for x in d],
-                                          "c": [m[x][3] for x in d], "v": [0] * len(d)}
-    json.dump(mi, open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
-    print(f"→ VKOSPI {len(d)}일 · {d[0]}~{d[-1]} · 마지막 {m[d[-1]][3]}")
+    save("KIS:U" + best[0], best[1])
 
 
 if __name__ == "__main__":
