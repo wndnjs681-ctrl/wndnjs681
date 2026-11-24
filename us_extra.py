@@ -271,8 +271,64 @@ def us_all():
         mc = num(r.get("marketCap"))
         out.append([t, nm[:36], num(r.get("lastsale")), round(num(r.get("pctchange")) or 0, 2), int(mc) if mc else None, int(num(r.get("volume")) or 0),
                     (r.get("sector") or "").strip(), (r.get("industry") or "").strip()[:28], None, "", 1 if spac else 0])
+    # 나스닥 스크리너의 lastsale 은 갱신이 늦거나(주말 뒤 금요일 장중 값이 남는 등) 장중 값일 때가 있다 → 야후 일봉 종가로 덮어쓴다
+    yc = yahoo_closes([r[0] for r in out])
+    fixed, cd = 0, {}
+    for r in out:
+        y = yc.get(r[0])
+        if y:
+            c, pv, d, v = y
+            if r[4] and r[2]:
+                r[4] = int(r[4] * c / r[2])                       # 시가총액도 새 종가 비율로
+            r[2], r[3] = round(c, 4), round((c / pv - 1) * 100, 2) if pv else r[3]
+            if v:
+                r[5] = int(v)
+            fixed += 1
+            cd[d] = cd.get(d, 0) + 1
+        r.append(y[2] if y else None)                          # 11: 종가 기준일(없으면 나스닥 값 그대로)
+    close_d = max(cd, key=cd.get) if cd else None
+    print(f"야후 종가로 교정 {fixed}/{len(out)} · 기준일 {cd}", flush=True)
     LOG["ussc"] = len(out)
-    return {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "cols": ["t", "n", "px", "chg", "mc", "vol", "sec", "ind", "ipo", "ctry", "spac"], "rows": out}
+    LOG["ussc_fixed"] = fixed
+    return {"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "close_d": close_d, "fixed": fixed,
+            "cols": ["t", "n", "px", "chg", "mc", "vol", "sec", "ind", "ipo", "ctry", "spac", "d"], "rows": out}
+
+
+def yahoo_closes(tickers, budget=420):
+    """야후 일봉으로 마지막 종가·전일 종가·날짜·거래량. {티커: (종가, 전일, 'YYYY-MM-DD', 거래량)}"""
+    try:
+        import yfinance as yf
+        import pandas as pd
+    except Exception as e:
+        print("yfinance 없음:", e)
+        return {}
+    t0, res, CH = time.time(), {}, 400
+    ymap = {t: t.replace(".", "-") for t in tickers}
+    inv = {v: k for k, v in ymap.items()}
+    ys = list(inv)
+    for k in range(0, len(ys), CH):
+        if time.time() - t0 > budget:
+            print("야후 종가 시간 초과 — 나머지는 나스닥 값", flush=True)
+            break
+        part = ys[k:k + CH]
+        try:
+            df = yf.download(part, period="10d", interval="1d", auto_adjust=False, progress=False, threads=True, group_by="ticker")
+        except Exception as e:
+            print("야후 묶음 실패", k, type(e).__name__)
+            continue
+        for y in part:
+            try:
+                sub = df[y] if isinstance(df.columns, pd.MultiIndex) and y in df.columns.get_level_values(0) else df
+                cl = sub["Close"].dropna()
+                if len(cl) < 2:
+                    continue
+                vol = sub["Volume"].reindex(cl.index)
+                res[inv[y]] = (float(cl.iloc[-1]), float(cl.iloc[-2]), cl.index[-1].strftime("%Y-%m-%d"),
+                               float(vol.iloc[-1]) if vol.notna().iloc[-1] else None)
+            except Exception:
+                continue
+    print(f"야후 종가 {len(res)}/{len(tickers)} · {time.time() - t0:.0f}초", flush=True)
+    return res
 
 
 # ───────── 피드 ─────────
