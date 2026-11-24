@@ -374,7 +374,60 @@ def experiment(D):
     bwp = {k: round(v / tot * 100) for k, v in bw.items() if v}
     out.append(dict(n="최적(앞 절반으로 고름)", w=bwp, best=True, **ev(bw)))
     print("[exp]", [(o["n"], o["ic60"], o["ic60a"], o["ic60b"], o["spread"]) for o in out], flush=True)
-    return {"schemes": out, "cut": str(cut), "weeks": len(weeks)}
+    return {"schemes": out, "cut": str(cut), "weeks": len(weeks), "regime": regime_exp(X, comp, rf60, cut)}
+
+
+REG = [("bull", "강세", 65, 101), ("mid", "중립", 50, 65), ("bear", "약세", 0, 50)]
+
+
+def regime_exp(X, comp, rf60, cut):
+    """시장 점수(우호도) 구간별로 어느 항목이 같은 날 순위를 맞혔나 → 구간별 비중(화면에서 바로 쓰는 추세·위치·모멘텀만).
+    구간마다 앞 절반 기간으로 비중을 고르고, 뒤 절반에서 '고정 비중'과 비교한다."""
+    g = X["i"]
+    fav = X.groupby("i")["c_mkt"].first()
+    reg_of = {i: next(k for k, _, lo, hi in REG if lo <= f < hi) for i, f in fav.items()}
+    wk_reg = pd.Series(reg_of)
+    ics = {}
+
+    def wic(w):
+        key = tuple(sorted(w.items()))
+        if key not in ics:
+            sc = sum(comp[k] * v for k, v in w.items() if v)
+            ics[key] = _wk_corr(X, sc.groupby(g).rank(), rf60)
+        return ics[key]
+
+    singles = {k: wic({k: 1}) for k in ("trend", "pos", "mom", "rev", "lowvol", "high")}
+    grid = [{"trend": a, "pos": b, "mom": c} for a in range(4) for b in range(4) for c in range(4) if a + b + c]
+    cur = {"trend": 30, "pos": 25, "mom": 10}
+    out, chosen = [], {}
+    for k, lab, lo, hi in REG:
+        wks = wk_reg[wk_reg == k].index
+        tr_w = [i for i in wks if i < cut]
+        if len(wks) < 6:
+            out.append({"k": k, "lab": lab, "lo": lo, "weeks": int(len(wks))})
+            continue
+        sel = tr_w if len(tr_w) >= 6 else list(wks)           # 앞 절반에 그 장세가 거의 없으면 전체로(표시)
+        best = max(grid, key=lambda w: float(wic(w).reindex(sel).mean()))
+        t = sum(best.values())
+        chosen[k] = best
+        mean_in = lambda s, idx: round(float(s.reindex(idx).dropna().mean()), 3) if len(s.reindex(idx).dropna()) else None
+        out.append({"k": k, "lab": lab, "lo": lo, "weeks": int(len(wks)), "train_weeks": int(len(tr_w)), "from_all": len(tr_w) < 6,
+                    "single": {f: mean_in(v, wks) for f, v in singles.items()},
+                    "w": {f: round(v / t * 65) for f, v in best.items()},
+                    "ic_best": mean_in(wic(best), wks), "ic_cur": mean_in(wic(cur), wks)})
+    # 장세 연동 점수 vs 고정 점수(전체·뒤 절반)
+    res = {"rows": out}
+    if chosen:
+        parts = []
+        for k, w in chosen.items():
+            wks = set(wk_reg[wk_reg == k].index)
+            parts.append(wic(w)[wic(w).index.isin(wks)])
+        sw = pd.concat(parts).sort_index()
+        fixed = {"현재 점수": wic(cur), "모멘텀 중심(추세20·모멘텀40)": wic({"trend": 20, "mom": 40})}
+        res["cmp"] = [{"n": "장세 연동", "ic": round(float(sw.mean()), 3), "icb": round(float(sw[sw.index >= cut].mean()), 3), "pos": round(float((sw > 0).mean() * 100))}] + \
+                     [{"n": n, "ic": round(float(s.mean()), 3), "icb": round(float(s[s.index >= cut].mean()), 3), "pos": round(float((s > 0).mean() * 100))} for n, s in fixed.items()]
+    print("[regime]", json.dumps(res, ensure_ascii=False)[:1500], flush=True)
+    return res
 
 
 def main():
