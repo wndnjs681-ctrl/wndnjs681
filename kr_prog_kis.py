@@ -80,6 +80,10 @@ def main():
     tok = token()
     if not tok:
         return
+    try:                                                   # 같은 작업의 vkospi_kis.py 가 다시 쓰게(토큰 발급 횟수 제한)
+        json.dump({"tok": tok, "at": time.time()}, open(os.getenv("KIS_TOKEN_FILE", "/tmp/kis_token.json"), "w"))
+    except Exception:
+        pass
     p = os.path.join(OUT, "market_index.json")
     mi = json.load(open(p, encoding="utf-8"))
     flow = mi.setdefault("flow", {})
