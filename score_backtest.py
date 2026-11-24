@@ -398,6 +398,8 @@ def regime_exp(X, comp, rf60, cut):
 
     singles = {k: wic({k: 1}) for k in ("trend", "pos", "mom", "rev", "lowvol", "high")}
     grid = [{"trend": a, "pos": b, "mom": c} for a in range(4) for b in range(4) for c in range(4) if a + b + c]
+    # 약세장: 급락 뒤 많이 빠진 종목의 반등(단기 되돌림)까지 후보에 넣는다
+    grid_bear = [{"trend": a, "pos": b, "mom": c, "rev": d} for a in range(4) for b in range(4) for c in range(4) for d in range(1, 4)]
     cur = {"trend": 30, "pos": 25, "mom": 10}
     out, chosen = [], {}
     for k, lab, lo, hi in REG:
@@ -407,7 +409,7 @@ def regime_exp(X, comp, rf60, cut):
             out.append({"k": k, "lab": lab, "lo": lo, "weeks": int(len(wks))})
             continue
         sel = tr_w if len(tr_w) >= 6 else list(wks)           # 앞 절반에 그 장세가 거의 없으면 전체로(표시)
-        best = max(grid, key=lambda w: float(wic(w).reindex(sel).mean()))
+        best = max(grid_bear if k == "bear" else grid, key=lambda w: float(wic(w).reindex(sel).mean()))
         t = sum(best.values())
         chosen[k] = best
         mean_in = lambda s, idx: round(float(s.reindex(idx).dropna().mean()), 3) if len(s.reindex(idx).dropna()) else None
