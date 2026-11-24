@@ -141,6 +141,58 @@ def krx():
     return None, {}
 
 
+def others():
+    """그 밖의 공개 경로: 인베스팅닷컴 API → 네이버 모바일 → 야후 ^VKOSPI. 되는 첫 경로를 쓴다."""
+    UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
+    try:                                                     # 인베스팅닷컴: 검색으로 id → 일별 시세
+        r = requests.get("https://api.investing.com/api/search/v2/search", params={"q": "vkospi"}, headers={**UA, "domain-id": "www"}, timeout=20)
+        print(f"  인베스팅 검색: HTTP {r.status_code} · {r.text[:200]!r}")
+        q = (r.json().get("quotes") or []) if r.ok else []
+        q = [x for x in q if "VKOSPI" in str(x.get("symbol", "")).upper() or "volatility" in str(x.get("description", "")).lower()]
+        if q:
+            iid = q[0]["id"]
+            m = {}
+            end = datetime.now(KST)
+            for k in range(5):
+                st, en = end - timedelta(days=365 * (k + 1)), end - timedelta(days=365 * k)
+                r = requests.get(f"https://api.investing.com/api/financialdata/historical/{iid}", params={"start-date": st.strftime("%Y-%m-%d"),
+                                 "end-date": en.strftime("%Y-%m-%d"), "time-frame": "Daily", "add-missing-rows": "false"}, headers={**UA, "domain-id": "www"}, timeout=20)
+                rows = (r.json().get("data") or []) if r.ok else []
+                if not k:
+                    print(f"  인베스팅 시세 {iid}: HTTP {r.status_code} · {len(rows)}행 · {str(rows[:1])[:200]}")
+                for x in rows:
+                    d = str(x.get("rowDateTimestamp") or x.get("rowDateRaw") or "")[:10]
+                    f = lambda kk: round(float(x.get(kk)), 2) if x.get(kk) not in (None, "") else None
+                    if d and f("last_closeRaw"):
+                        m[d] = (f("last_openRaw"), f("last_maxRaw"), f("last_minRaw"), f("last_closeRaw"))
+                if not rows:
+                    break
+            if len(m) > 100:
+                return f"investing:{iid}", m
+    except Exception as e:
+        print("  인베스팅:", type(e).__name__, str(e)[:150])
+    for u in ("https://m.stock.naver.com/api/index/VKOSPI/price?pageSize=60&page=1", "https://polling.finance.naver.com/api/realtime/domestic/index/VKOSPI"):
+        try:
+            r = requests.get(u, headers=UA, timeout=15)
+            print(f"  네이버 {u.split('/api/')[1][:40]}: HTTP {r.status_code} · {r.text[:160]!r}")
+        except Exception as e:
+            print("  네이버:", type(e).__name__)
+    try:
+        r = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/%5EVKOSPI", params={"range": "5y", "interval": "1d"}, headers=UA, timeout=20)
+        print(f"  야후 ^VKOSPI: HTTP {r.status_code} · {r.text[:160]!r}")
+        res = r.json()["chart"]["result"][0]
+        q = res["indicators"]["quote"][0]
+        m = {}
+        for t, o, h, l, c in zip(res["timestamp"], q["open"], q["high"], q["low"], q["close"]):
+            if c:
+                m[datetime.fromtimestamp(t, KST).strftime("%Y-%m-%d")] = tuple(round(x, 2) if x else None for x in (o, h, l, c))
+        if len(m) > 100:
+            return "^VKOSPI", m
+    except Exception as e:
+        print("  야후:", type(e).__name__, str(e)[:100])
+    return None, {}
+
+
 def save(sym, m):
     d = sorted(m)[-KEEP:]
     p = os.path.join(OUT, "market_index.json")
@@ -154,6 +206,8 @@ def save(sym, m):
 
 def main():
     sym, m = krx()
+    if not m:
+        sym, m = others()
     if m:
         save(sym, m)
         return
