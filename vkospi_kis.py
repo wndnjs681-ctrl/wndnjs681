@@ -42,8 +42,10 @@ def codes():
         r = requests.get("https://new.real.download.dws.co.kr/common/master/idxcode.mst.zip", timeout=30)
         z = zipfile.ZipFile(io.BytesIO(r.content))
         txt = z.read(z.namelist()[0]).decode("cp949", "ignore")
+        print(f"  코드표 {len(txt.splitlines())}줄 · 예: {txt.splitlines()[:3]}")
         for ln in txt.splitlines():
-            if "변동성지수" in ln and "200" in ln and "목표" not in ln:
+            u = ln.upper()
+            if "VKOSPI" in u or "V-KOSPI" in u or "VIX" in u or ("변동성" in ln and "200" in ln and "목표" not in ln and "저변동" not in ln):
                 m = re.match(r"\s*\S?(\d{4})", ln)
                 print("  코드표:", ln.strip()[:60])
                 if m:
@@ -98,8 +100,16 @@ KH = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.krx.co.kr/contents/M
 def krx():
     """KRX 정보데이터시스템: 지수 검색으로 '변동성' 지수 코드를 찾고 일별 시세를 받는다."""
     cands, r = [], None
-    for mkt in ("1", "2", "3", "4", "5", ""):
+    for mkt in ("1", "ALL", "5"):
         try:
+            r = requests.post(KRX, data={"bld": "dbms/comm/finder/finder_equidx", "mktsel": mkt, "searchText": "", "locale": "ko_KR"}, headers=KH, timeout=20)
+            allr = (r.json().get("block1") or []) if r.ok else []
+            print(f"  KRX 전체 목록 mktsel={mkt}: {len(allr)}건 · {[x.get('codeName') for x in allr if '변동' in str(x.get('codeName'))][:8]}")
+            for x in allr:
+                if "변동성지수" in str(x.get("codeName")) and "200" in str(x.get("codeName")):
+                    cands.append(x)
+            if cands:
+                break
             r = requests.post(KRX, data={"bld": "dbms/comm/finder/finder_equidx", "mktsel": mkt, "searchText": "변동성"}, headers=KH, timeout=20)
             j = r.json()
             rows = j.get("block1") or []

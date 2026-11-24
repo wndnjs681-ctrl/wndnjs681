@@ -29,6 +29,12 @@ def num(v):
 
 
 def token():
+    try:                                                   # 같은 작업에서 이미 받은 토큰이 있으면 다시 쓴다(발급 횟수 제한)
+        t = json.load(open(os.getenv("KIS_TOKEN_FILE", "/tmp/kis_token.json")))
+        if time.time() - t["at"] < 6 * 3600:
+            return t["tok"]
+    except Exception:
+        pass
     r = requests.post(BASE + "/oauth2/tokenP", json={"grant_type": "client_credentials", "appkey": KEY, "appsecret": SECRET}, timeout=20)
     j = r.json()
     if not j.get("access_token"):
