@@ -411,7 +411,9 @@ def regime_exp(X, comp, rf60, cut):
         t = sum(best.values())
         chosen[k] = best
         mean_in = lambda s, idx: round(float(s.reindex(idx).dropna().mean()), 3) if len(s.reindex(idx).dropna()) else None
+        wm = X[X["i"].isin(wks)].groupby("i")[["f20", "f60"]].mean()      # 그 장세였던 주의 유니버스 평균 수익률
         out.append({"k": k, "lab": lab, "lo": lo, "weeks": int(len(wks)), "train_weeks": int(len(tr_w)), "from_all": len(tr_w) < 6,
+                    "u20": round(float(wm.f20.mean() * 100), 2), "u60": round(float(wm.f60.mean() * 100), 2), "uhit60": round(float((wm.f60 > 0).mean() * 100)),
                     "single": {f: mean_in(v, wks) for f, v in singles.items()},
                     "w": {f: round(v / t * 65) for f, v in best.items()},
                     "ic_best": mean_in(wic(best), wks), "ic_cur": mean_in(wic(cur), wks)})
