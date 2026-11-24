@@ -40,6 +40,7 @@ IDX = [
     ("DXY", ["DX-Y.NYB"], "달러인덱스", "macro", "거시", NY, (17, 5), False, "fx"),
     ("USDKRW", ["KRW=X"], "원/달러", "macro", "거시", NY, (17, 5), False, "fx"),
     ("USDJPY", ["JPY=X"], "엔/달러", "macro", "거시", NY, (17, 5), False, "fx"),
+    ("VKOSPI", ["VKOSPI"], "VKOSPI(코스피 공포지수)", "macro", "거시", "Asia/Seoul", (15, 50), False, "vix"),
 ]
 
 
@@ -101,6 +102,54 @@ def fdr(sym):
         return None
 
 
+def vkospi():
+    """VKOSPI(코스피200 변동성지수) — 야후에 없다. 네이버 차트 → 네이버 시세 JSON → FinanceDataReader 순으로 시도."""
+    import re as _re
+    start = (datetime.now() - timedelta(days=int(KEEP * 1.45))).strftime("%Y%m%d")
+    H = {"User-Agent": UA, "Referer": "https://finance.naver.com/"}
+    out = {}
+    try:                                                     # 1) 네이버 차트 XML: <item data="20261123|o|h|l|c|v" />
+        r = requests.get("https://fchart.stock.naver.com/sise.nhn", params={"symbol": "VKOSPI", "timeframe": "day", "count": KEEP + 20, "requestType": "0"},
+                         headers=H, timeout=20)
+        for d in _re.findall(r'data="([^"]+)"', r.text):
+            x = d.split("|")
+            if len(x) >= 5 and x[4] not in ("", "null"):
+                f = lambda v: _r(float(v)) if v not in ("", "null", "0") else None
+                out[f"{x[0][:4]}-{x[0][4:6]}-{x[0][6:8]}"] = (f(x[1]), f(x[2]), f(x[3]), f(x[4]), 0)
+        print(f"  VKOSPI 네이버 차트: HTTP {r.status_code} · {len(out)}일 · {r.text[:120]!r}"[:260])
+        if len(out) > 100:
+            return out
+    except Exception as e:
+        print(f"  VKOSPI 네이버 차트: {type(e).__name__} {e}"[:160])
+    try:                                                     # 2) 네이버 시세 JSON(배열 텍스트)
+        r = requests.get("https://api.finance.naver.com/siseJson.naver", params={"symbol": "VKOSPI", "requestType": "1", "startTime": start,
+                         "endTime": datetime.now().strftime("%Y%m%d"), "timeframe": "day"}, headers=H, timeout=20)
+        out = {}
+        for row in _re.findall(r'\[\s*"(\d{8})"\s*,([^\]]*)\]', r.text):
+            v = [x.strip() for x in row[1].split(",")]
+            if len(v) >= 4:
+                f = lambda z: _r(float(z)) if z not in ("", "null", "0") else None
+                d = row[0]
+                out[f"{d[:4]}-{d[4:6]}-{d[6:8]}"] = (f(v[0]), f(v[1]), f(v[2]), f(v[3]), 0)
+        print(f"  VKOSPI 네이버 시세: HTTP {r.status_code} · {len(out)}일 · {r.text[:120]!r}"[:260])
+        if len(out) > 100:
+            return out
+    except Exception as e:
+        print(f"  VKOSPI 네이버 시세: {type(e).__name__} {e}"[:160])
+    for code in ("VKOSPI", "KRX:VKOSPI"):                    # 3) FinanceDataReader
+        try:
+            import FinanceDataReader as F
+            df = F.DataReader(code, f"{start[:4]}-{start[4:6]}-{start[6:]}").dropna(subset=["Close"])
+            g = lambda row, k: _r(float(row[k])) if k in row and row[k] == row[k] else None
+            out = {i.strftime("%Y-%m-%d"): (g(row, "Open"), g(row, "High"), g(row, "Low"), g(row, "Close"), 0) for i, row in df.iterrows()}
+            print(f"  VKOSPI FDR {code}: {len(out)}일")
+            if len(out) > 100:
+                return out
+        except Exception as e:
+            print(f"  VKOSPI FDR {code}: {type(e).__name__} {e}"[:160])
+    return None
+
+
 def _pbbt():
     try:
         return json.load(open(os.path.join(OUT_DIR, "pb_backtest.json"), encoding="utf-8"))
@@ -120,7 +169,7 @@ def main():
     for key, syms, name, mk, rg, tz, ready, core, kind in IDX:
         got = used = None
         for sym in syms:
-            got = yahoo(sym, tz) or fdr(sym)
+            got = vkospi() if key == "VKOSPI" else (yahoo(sym, tz) or fdr(sym))
             if got:
                 used = sym
                 break
