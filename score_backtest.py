@@ -172,6 +172,7 @@ def run(mk):
     trend = sum(M[k].fillna(0) for k, _ in MASTERS) / len(MASTERS) * 100
     ext = C / m50 - 1
     g200 = C / m200 - 1
+    R20, DH = ret(20), C / hi - 1
     F5, F20, F60 = C.shift(-5) / C - 1, C.shift(-20) / C - 1, C.shift(-60) / C - 1
 
     # 주간 표본(지표가 충분한 날부터)
@@ -223,8 +224,9 @@ def run(mk):
             else:
                 vc = "pass"
             recs.append((i, t, score, vc, *(float(M[k].iat[i, j]) if np.isfinite(M[k].iat[i, j]) else np.nan for k, _ in MASTERS),
-                         F5.iat[i, j], F20.iat[i, j], F60.iat[i, j], px))
-    cols = ["i", "t", "score", "vc"] + [k for k, _ in MASTERS] + ["f5", "f20", "f60", "px"]
+                         F5.iat[i, j], F20.iat[i, j], F60.iat[i, j], px,
+                         tr_, pos, fv, mom, float(R20.iat[i, j]), float(atr20.iat[i, j]), float(DH.iat[i, j])))
+    cols = ["i", "t", "score", "vc"] + [k for k, _ in MASTERS] + ["f5", "f20", "f60", "px", "c_trend", "c_pos", "c_mkt", "c_mom", "r20", "atr", "dh"]
     D = pd.DataFrame(recs, columns=cols)
     print(f"[{mk}] 표본 {len(D):,}개 · {D['i'].nunique()}주", flush=True)
     for h in ("f5", "f20", "f60"):                               # 같은 날 유니버스 평균 대비 초과수익
@@ -238,7 +240,10 @@ def run(mk):
                 o[h] = round(s.mean() * 100, 2)
                 o["m" + h[1:]] = round(s.median() * 100, 2)
                 o["hit" + h[1:]] = round((s > 0).mean() * 100)
-                o["x" + h[1:]] = round(g["x" + h[1:]].dropna().mean() * 100, 2)
+                xs = g["x" + h[1:]].dropna()
+                o["x" + h[1:]] = round(xs.mean() * 100, 2)
+                o["xm" + h[1:]] = round(xs.median() * 100, 2)        # 같은 날 평균 대비 초과수익의 중앙값
+                o["xhit" + h[1:]] = round((xs > 0).mean() * 100)     # 같은 날 평균을 이긴 비율
         return o
 
     bins = [(80, 101, "80점 이상"), (70, 80, "70점대"), (60, 70, "60점대"), (50, 60, "50점대"), (40, 50, "40점대"), (0, 40, "40점 미만")]
@@ -280,16 +285,93 @@ def run(mk):
             p[k] = f"{row.px:.4g}" if row.px < 1e5 else str(int(round(row.px)))
         ser[t] = {"n": names.get(t, t), "s": ",".join(s), "p": ",".join(p)}
     now = D[D.i == D.i.max()].sort_values("score", ascending=False)
+    ex = experiment(D)
+    if ex:
+        ex["cut"] = C.index[int(ex["cut"])].strftime("%Y-%m-%d")
     res = {"market": mk, "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
            "period": [C.index[sidx[0]].strftime("%Y-%m-%d"), C.index[-1].strftime("%Y-%m-%d")], "tickers": int(C.shape[1]),
            "weeks": int(D["i"].nunique()), "samples": int(len(D)), "all": allv, "buckets": buckets, "verdicts": verdicts, "masters": masters,
            "ic": {"mean": round(float(ic.mean()), 3) if len(ic) else None, "pos": round(float((ic > 0).mean() * 100)) if len(ic) else None, "n": int(len(ic))},
            "strat": {"top10": stats(top_r, 20), "hi80": stats(hi_r, 20), "univ": stats(uni_r, 20), "curve": curve},
            "now": [[r.t, int(r.score)] for r in now.head(20).itertuples()],
-           "dates": dates, "s": ser, "w": W}
+           "dates": dates, "s": ser, "w": W, "exp": ex}
     b80 = buckets[0]
     print(f"[{mk}] 80점↑ {b80} · 전체 {allv} · IC {res['ic']} · Top10 {res['strat']['top10']} · 유니버스 {res['strat']['univ']}", flush=True)
     return res
+
+
+def _wk_corr(D, a, b):
+    """주별(같은 날) 순위상관 — a, b 는 이미 주별 순위. 반환: 주별 상관 Series"""
+    g = D["i"]
+    ac = a - a.groupby(g).transform("mean")
+    bc = b - b.groupby(g).transform("mean")
+    num = (ac * bc).groupby(g).sum()
+    den = np.sqrt((ac * ac).groupby(g).sum() * (bc * bc).groupby(g).sum())
+    n = g.groupby(g).size()
+    return (num / den.replace(0, np.nan))[n > 30].dropna()
+
+
+def experiment(D):
+    """가중치 실험 — 같은 날 종목끼리 순위를 얼마나 잘 맞히나(시장 효과 제거).
+    시장 항목(c_mkt)은 같은 날 모든 종목에 같은 값이라 순위에는 영향이 없다 → 실험에서 뺀다.
+    후보 항목: 추세·위치·모멘텀(지금 점수의 항목) + 단기 되돌림(최근 20일 덜 오른 쪽) · 낮은 변동성 · 52주 고점 근접.
+    앞 절반 기간으로 고르고 뒤 절반 기간으로 확인(과최적화 점검)."""
+    X = D.dropna(subset=["f60", "c_trend", "c_pos", "c_mom"]).copy()
+    if len(X) < 5000:
+        return None
+    g = X["i"]
+    pr = lambda col, asc=True: X[col].groupby(g).rank(pct=True, ascending=asc) * 100
+    comp = {"trend": X["c_trend"], "pos": X["c_pos"], "mom": X["c_mom"],
+            "rev": pr("r20", False).fillna(50), "lowvol": pr("atr", False).fillna(50), "high": pr("dh").fillna(50)}
+    rf60, rf20 = X["f60"].groupby(g).rank(), X["f20"].groupby(g).rank()
+    weeks = sorted(X["i"].unique())
+    cut = weeks[len(weeks) // 2]
+    fx = X["f60"] - X["f60"].groupby(g).transform("mean")
+    fx20 = X["f20"] - X["f20"].groupby(g).transform("mean")
+    reb = set(weeks[::4])
+
+    def ev(w):
+        sc = sum(comp[k] * v for k, v in w.items() if v) / max(1e-9, sum(w.values()))
+        sc = sc + np.random.default_rng(0).random(len(sc)) * 1e-6           # 동점 깨기
+        rk = sc.groupby(g).rank()
+        ic60, ic20 = _wk_corr(X, rk, rf60), _wk_corr(X, rk, rf20)
+        q = sc.groupby(g).rank(pct=True)
+        top, bot = fx[q >= 0.9].mean() * 100, fx[q <= 0.1].mean() * 100
+        t10 = X.assign(sc=sc, fx20=fx20)[X["i"].isin(reb)].sort_values("sc", ascending=False).groupby("i").head(10).groupby("i")["fx20"].mean()
+        A, B_ = ic60[ic60.index < cut], ic60[ic60.index >= cut]
+        return {"ic60": round(float(ic60.mean()), 3), "ic20": round(float(ic20.mean()), 3), "pos60": round(float((ic60 > 0).mean() * 100)),
+                "ic60a": round(float(A.mean()), 3) if len(A) else None, "ic60b": round(float(B_.mean()), 3) if len(B_) else None,
+                "top": round(float(top), 2), "bot": round(float(bot), 2), "spread": round(float(top - bot), 2),
+                "t10x": round(float(t10.mean() * 100), 2) if len(t10) else None}
+
+    named = [("현재 점수(추세30·위치25·모멘텀10)", {"trend": 30, "pos": 25, "mom": 10}),
+             ("추세만", {"trend": 1}), ("위치만", {"pos": 1}), ("모멘텀(RS)만", {"mom": 1}),
+             ("단기 되돌림만", {"rev": 1}), ("낮은 변동성만", {"lowvol": 1}), ("52주 고점 근접만", {"high": 1}),
+             ("위치 제외(추세30·모멘텀10)", {"trend": 30, "mom": 10}),
+             ("모멘텀 강화(추세30·위치10·모멘텀30)", {"trend": 30, "pos": 10, "mom": 30})]
+    out = [dict(n=n, w=w, **ev(w)) for n, w in named]
+    # 격자 탐색: 앞 절반 IC(3개월) 로만 고른다
+    best, bw = None, None
+    for a in range(4):
+        for b_ in range(4):
+            for c in range(4):
+                for d in range(3):
+                    for e in range(3):
+                        for f in range(3):
+                            w = {"trend": a, "pos": b_, "mom": c, "rev": d, "lowvol": e, "high": f}
+                            if not sum(w.values()):
+                                continue
+                            sc = sum(comp[k] * v for k, v in w.items() if v)
+                            rk = sc.groupby(g).rank()
+                            ic = _wk_corr(X, rk, rf60)
+                            tr = float(ic[ic.index < cut].mean())
+                            if best is None or tr > best:
+                                best, bw = tr, w
+    tot = sum(bw.values())
+    bwp = {k: round(v / tot * 100) for k, v in bw.items() if v}
+    out.append(dict(n="최적(앞 절반으로 고름)", w=bwp, best=True, **ev(bw)))
+    print("[exp]", [(o["n"], o["ic60"], o["ic60a"], o["ic60b"], o["spread"]) for o in out], flush=True)
+    return {"schemes": out, "cut": str(cut), "weeks": len(weeks)}
 
 
 def main():
