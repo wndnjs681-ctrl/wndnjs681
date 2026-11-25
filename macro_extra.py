@@ -153,8 +153,10 @@ def yahoo_hist(sym):
             m = {datetime.fromtimestamp(t + 12 * 3600, timezone.utc).strftime("%Y-%m-%d"): c for t, c in zip(res["timestamp"], cl) if c}
             m = {d: c for d, c in m.items() if date.fromisoformat(d).weekday() < 5}
             meta = res.get("meta") or {}
-            if meta.get("regularMarketPrice") and meta.get("regularMarketTime"):
-                m[datetime.fromtimestamp(meta["regularMarketTime"], timezone(timedelta(hours=-5))).strftime("%Y-%m-%d")] = meta["regularMarketPrice"]
+            if meta.get("regularMarketPrice") and meta.get("regularMarketTime"):   # 일봉에 아직 없는 날만 마지막 체결가로(전날 종가를 덮지 않게)
+                md = datetime.fromtimestamp(meta["regularMarketTime"], timezone(timedelta(hours=-5))).strftime("%Y-%m-%d")
+                if m and md > max(m):
+                    m[md] = meta["regularMarketPrice"]
             if m:
                 return m
         except Exception as e:
