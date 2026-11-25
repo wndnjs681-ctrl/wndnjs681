@@ -1,0 +1,42 @@
+name: mem-backfill
+
+# 메모리 현물 가격 과거 자료를 인터넷 아카이브 사본으로 채운다 — 수동 실행(한 번이면 충분, 중간에 끊기면 다시 실행하면 이어서).
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "며칠 전부터 채울지"
+        default: "400"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-full
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet requests
+      - name: Backfill
+        env:
+          PYTHONUNBUFFERED: "1"
+          MEM_BACKFILL_DAYS: ${{ github.event.inputs.days || '400' }}
+        run: python mem_backfill.py
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/mem_hist.json output/market_index.json
+          git diff --staged --quiet || git commit -m "mem-backfill: $(date -u +%Y-%m-%d\ %H:%M) UTC"
+          git pull --rebase --autostash || true
+          git push

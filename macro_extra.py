@@ -67,8 +67,24 @@ def dram():
     r = requests.get("https://www.dramexchange.com/", headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}, timeout=30)
     print(f"DRAMeXchange: HTTP {r.status_code} · {len(r.text):,}자", flush=True)
     r.raise_for_status()
+    return parse_dram(r.text, log=True)
+
+
+def upd_day(upd, default):
+    """'Last Update: Nov. 24 2026' 같은 표기 → YYYY-MM-DD"""
+    if upd:
+        u = re.sub(r"\s+", " ", upd.replace(".", " ")).strip()
+        for fmt in ("%b %d %Y", "%B %d %Y", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(u, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    return default
+
+
+def parse_dram(text, log=False):
     p = Tables()
-    p.feed(r.text)
+    p.feed(text)
     upd = re.search(r"Last Update\s*:?\s*([A-Za-z]{3}\.?\s*\d{1,2}\s*\d{4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})", r.text)
     items = []
     for t in p.tables:
@@ -90,8 +106,9 @@ def dram():
                 continue
             items.append({"item": row[0], "avg": v, "chg": fnum(row[ic]) if ic is not None and ic < len(row) else None,
                           "hdr": rows[0][ia], "tbl": t["title"]})
-    print("  표:", [(t["title"], len(t["rows"]), t["rows"][0][:6] if t["rows"] else []) for t in p.tables][:14], flush=True)
-    print("  항목:", [(x["item"], x["avg"], x["chg"]) for x in items][:40], flush=True)
+    if log:
+        print("  표:", [(t["title"], len(t["rows"]), t["rows"][0][:6] if t["rows"] else []) for t in p.tables][:14], flush=True)
+        print("  항목:", [(x["item"], x["avg"], x["chg"]) for x in items][:40], flush=True)
     return items, (upd.group(1) if upd else None)
 
 
@@ -108,14 +125,7 @@ MEM_PICK = [
 
 def mem():
     items, upd = dram()
-    day = datetime.now(KST).strftime("%Y-%m-%d")
-    if upd:
-        for fmt in ("%b %d %Y", "%b. %d %Y", "%Y-%m-%d", "%Y/%m/%d"):
-            try:
-                day = datetime.strptime(re.sub(r"\s+", " ", upd.replace(".", ". ").replace(". ", " ")).strip(), fmt).strftime("%Y-%m-%d")
-                break
-            except ValueError:
-                continue
+    day = upd_day(upd, datetime.now(KST).strftime("%Y-%m-%d"))
     hp = os.path.join(OUT, "mem_hist.json")
     try:
         H = json.load(open(hp, encoding="utf-8"))
