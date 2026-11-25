@@ -227,8 +227,9 @@ def fedwatch():
         prev_end = None
         for d in [x for x in meets if x > date.fromisoformat(asof)]:
             ym = (d.year, d.month)
-            if ym not in r:
-                break
+            if ym not in r:                                  # 이미 만기된 월물(과거 날짜로 다시 계산할 때) — 그 회의는 건너뛴다
+                prev_end = None
+                continue
             N = monthrange(*ym)[1]
             pm = (d.year - 1, 12) if d.month == 1 else (d.year, d.month - 1)
             pm_has = any((x.year, x.month) == pm for x in meets)
