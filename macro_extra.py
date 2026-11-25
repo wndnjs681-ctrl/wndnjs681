@@ -149,7 +149,9 @@ def yahoo_hist(sym):
                              headers={"User-Agent": UA}, timeout=20)
             res = r.json()["chart"]["result"][0]
             cl = res["indicators"]["quote"][0]["close"]
-            m = {datetime.fromtimestamp(t, timezone(timedelta(hours=-5))).strftime("%Y-%m-%d"): c for t, c in zip(res["timestamp"], cl) if c}
+            # 선물 일봉의 시각은 전날 저녁 장 시작(미 중부 17시)으로 찍히기도 한다 → UTC+12시간으로 옮겨 거래일 날짜로
+            m = {datetime.fromtimestamp(t + 12 * 3600, timezone.utc).strftime("%Y-%m-%d"): c for t, c in zip(res["timestamp"], cl) if c}
+            m = {d: c for d, c in m.items() if date.fromisoformat(d).weekday() < 5}
             meta = res.get("meta") or {}
             if meta.get("regularMarketPrice") and meta.get("regularMarketTime"):
                 m[datetime.fromtimestamp(meta["regularMarketTime"], timezone(timedelta(hours=-5))).strftime("%Y-%m-%d")] = meta["regularMarketPrice"]
