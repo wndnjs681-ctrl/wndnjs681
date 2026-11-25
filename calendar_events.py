@@ -651,7 +651,8 @@ FOMC_KNOWN = {2026: ["01-27/28", "03-17/18", "04-28/29", "06-16/17", "07-28/29",
 MON = {m: i + 1 for i, m in enumerate(["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"])}
 
 
-def fomc():
+def fomc_dates():
+    """{회의 마지막 날 date: 점도표 여부}, 출처"""
     got = {}
     try:
         html = requests.get("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm", headers={"User-Agent": UA}, timeout=25).text
@@ -680,6 +681,11 @@ def fomc():
             for s in L:
                 m, dd = s.split("-")
                 got[date(y, int(m), int(dd.split("/")[-1]))] = s in ("03-17/18", "06-16/17", "09-15/16", "12-08/09")
+    return got, src
+
+
+def fomc():
+    got, src = fomc_dates()
     for d, sep in got.items():
         kst = (datetime(d.year, d.month, d.day, 14, 0) + timedelta(hours=13 if nth_wd(d.year, 3, 6, 2) <= d < nth_wd(d.year, 11, 6, 1) else 14)).strftime("%m/%d %H:%M")
         add(d, "us", "cb", "FOMC 금리 결정" + (" · 경제전망(점도표)" if sep else ""), 3, kst=kst, x="성명서 14:00(미 동부) · 의장 기자회견 14:30")

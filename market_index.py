@@ -151,7 +151,7 @@ def main():
     if not out:
         sys.exit("지수를 하나도 받지 못했습니다")
     json.dump({"asof": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "idx": out,
-               **{k: prev_all[k] for k in ("deriv", "flow", "cal", "ipo", "sbt", "opt", "earn", "macro", "ussc", "feed") if prev_all.get(k)},   # 파생 포지션·수급·일정·공모주(ipo_data.py)는 그대로 둔다
+               **{k: prev_all[k] for k in ("deriv", "flow", "cal", "ipo", "sbt", "opt", "earn", "macro", "ussc", "feed", "mem", "fw") if prev_all.get(k)},   # 파생 포지션·수급·일정·공모주(ipo_data.py)는 그대로 둔다
                **({"pbbt": _pbbt()} if _pbbt() else {})},                               # 포트폴리오 스타일 백테스트(backtest_styles.py)
               open(p, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print(f"→ {p} {os.path.getsize(p):,} bytes")
