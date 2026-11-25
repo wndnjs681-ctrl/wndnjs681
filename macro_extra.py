@@ -85,7 +85,7 @@ def upd_day(upd, default):
 def parse_dram(text, log=False):
     p = Tables()
     p.feed(text)
-    upd = re.search(r"Last Update\s*:?\s*([A-Za-z]{3}\.?\s*\d{1,2}\s*\d{4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})", r.text)
+    upd = re.search(r"Last Update\s*:?\s*([A-Za-z]{3}\.?\s*\d{1,2}\s*\d{4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})", text)
     items = []
     for t in p.tables:
         rows = t["rows"]
