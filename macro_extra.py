@@ -237,6 +237,7 @@ def fedwatch():
                 r[ym] = 100 - h[max(ks)]
         res, S = {}, None
         prev_end = None
+        tree = {round(lo_now, 2): 1.0}                         # CME 방식: 회의마다 움직임 확률을 구해 앞 회의 결과와 겹친다(트리)
         for d in [x for x in meets if x > date.fromisoformat(asof)]:
             ym = (d.year, d.month)
             if ym not in r:                                  # 이미 만기된 월물(과거 날짜로 다시 계산할 때) — 그 회의는 건너뛴다
@@ -256,12 +257,19 @@ def fedwatch():
             else:
                 Ee = (r[ym] * N - S * d.day) / (N - d.day)
             prev_end = Ee
+            mv = (Ee - S) / 0.25                                 # 이번 회의의 기대 움직임(0.25%p 단위)
+            k = int(mv // 1)
+            f = mv - k
+            nt = {}
+            for lo, p in tree.items():
+                for st, q in ((k, 1 - f), (k + 1, f)):
+                    if q > 1e-9:
+                        key = round(lo + st * 0.25, 2)
+                        nt[key] = nt.get(key, 0) + p * q
+            tree = nt
             lo_after = Ee - spread                               # 회의 뒤 기대 목표 하단
-            steps = (lo_after - lo_now) / 0.25
-            k = int((steps // 1))
-            f = steps - k
-            dist = {round(lo_now + k * 0.25, 2): round((1 - f) * 100, 1), round(lo_now + (k + 1) * 0.25, 2): round(f * 100, 1)}
-            res[d.isoformat()] = {"dist": {f"{a:.2f}": p for a, p in dist.items() if p >= 0.05}, "exp": round(lo_after + 0.125, 3)}
+            res[d.isoformat()] = {"dist": {f"{a:.2f}": round(p * 100, 1) for a, p in sorted(tree.items()) if p >= 0.0005},
+                                  "move": round(mv * 25, 1), "exp": round(lo_after + 0.125, 3)}
         return res
 
     us_days = sorted({k for h in px.values() for k in h})
